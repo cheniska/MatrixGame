@@ -40,6 +40,10 @@ public sealed class PbStandaloneApp : MonoBehaviour
     private Mesh terrainMesh;
     private Mesh terrainVisualMesh;
     private MeshCollider terrainCollider;
+    private GameObject overlayRoot;
+    private int overlayTiles;
+    private int overlaySurfaces;
+    private int overlayMissing;
     private int terrainTextureCount;
     private int entityCount;
     private PbMapEntity selectedEntity;
@@ -121,7 +125,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
         if (smokeMode == "1" || smokeMode == "add" || smokeMode == "delete" ||
             smokeMode == "terrain" || smokeMode == "models" || smokeMode == "camera" ||
             smokeMode == "entities" || smokeMode == "textures" ||
-            smokeMode == "mirror" || smokeMode == "players")
+            smokeMode == "mirror" || smokeMode == "players" || smokeMode == "overlays")
         {
             if (storage == null)
             {
@@ -157,6 +161,18 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 players.Resources[0, 0] = "2501";
                 players.Ai[1, 3] = "0.75";
                 players.Maintenance = "125";
+            }
+            if (smokeMode == "overlays")
+            {
+                if (overlayTiles != storage.Count("toptextures", "Name", 5) ||
+                    overlaySurfaces != storage.Count("surfaces", "Name", 5) ||
+                    overlayMissing != 0)
+                    throw new InvalidOperationException("Map overlay textures are incomplete.");
+                GameObject factory = entityRoots.Find(root =>
+                    root.GetComponent<PbMapEntity>().Table == "buildings" &&
+                    root.GetComponent<PbMapEntity>().Kind != 0);
+                if (factory != null && factory.transform.Find("Factory ownership ring") == null)
+                    throw new InvalidOperationException("Factory ownership ring is absent.");
             }
             if (smokeMode == "entities")
             {
@@ -268,7 +284,9 @@ public sealed class PbStandaloneApp : MonoBehaviour
             outputPath = Path.Combine(Path.GetDirectoryName(mapPath),
                                       Path.GetFileNameWithoutExtension(mapPath) + "_edited.map");
             mapRoot = new GameObject("PB Map");
+            voLoader = new PbVoLoader(modelRoot);
             BuildTerrain();
+            BuildOverlays();
             int typeCount = parsed.Count("objtypes", "Name", 5);
             if (parsed.Count("objtypes", "Data", 5) != typeCount)
                 throw new InvalidDataException("Object type catalog columns differ.");
@@ -277,7 +295,6 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 typeNames.Add(parsed.String("objtypes", "Name", type));
                 typeData.Add(parsed.String("objtypes", "Data", type));
             }
-            voLoader = new PbVoLoader(modelRoot);
             activeType = 0;
             for (int row = 0; row < count; row++)
             {
@@ -301,7 +318,9 @@ public sealed class PbStandaloneApp : MonoBehaviour
                       ", VO: " + voLoader.LoadedModels + " loaded / " +
                       voLoader.MissingModels + " missing / " + voLoader.FailedModels +
                       " failed; textures: " + voLoader.LoadedTextures +
-                      ", terrain: " + terrainTextureCount + ", entities: " + entityCount;
+                      ", terrain: " + terrainTextureCount + ", overlays: " +
+                      overlayTiles + "/" + overlaySurfaces + "/" + overlayMissing +
+                      " missing, entities: " + entityCount;
             Debug.Log("PB standalone " + message);
         }
         catch (Exception error)
@@ -378,6 +397,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
             Destroy(oldTerrain.gameObject);
         }
         BuildTexturedTerrain(terrainMesh.vertices, terrain);
+        BuildOverlays();
         foreach (PbPlacedObject item in objects) AttachVisual(item);
         foreach (GameObject root in entityRoots)
         {
@@ -466,6 +486,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
         if (entity.Table == "buildings")
         {
             AttachEntityModel(root, "Matrix/Building/b" + entity.Kind + ".vo", Vector3.zero);
+            if (entity.Kind != 0) AttachCaptureRing(root, entity.Side);
             return;
         }
         if (entity.Table == "cannons")
@@ -591,6 +612,64 @@ public sealed class PbStandaloneApp : MonoBehaviour
         return Mathf.Lerp(Mathf.Lerp(grid[at].y, grid[at + 1].y, dx),
                           Mathf.Lerp(grid[at + width + 1].y,
                                      grid[at + width + 2].y, dx), dy);
+    }
+
+    private void BuildOverlays()
+    {
+        if (overlayRoot != null)
+        {
+            overlayRoot.SetActive(false);
+            Destroy(overlayRoot);
+        }
+        overlayRoot = new GameObject("Map overlays");
+        overlayRoot.transform.SetParent(mapRoot.transform, false);
+        var overlays = new PbMapOverlays(storage, voLoader, terrainMesh,
+                                         overlayRoot.transform, width, height, CellSize);
+        overlays.Build();
+        overlayTiles = overlays.Tiles;
+        overlaySurfaces = overlays.Surfaces;
+        overlayMissing = overlays.Missing;
+    }
+
+    private void AttachCaptureRing(GameObject building, int side)
+    {
+        Texture2D texture = voLoader.LoadTexture("Matrix/Textures/Billboard/zahspot");
+        if (texture == null) return;
+        Color color = side == 1 ? Color.yellow : side == 2 ? Color.red
+            : side == 3 ? Color.blue : side == 4 ? Color.green
+            : new Color(0.6f, 0.6f, 0.6f);
+        Material material = PbMapOverlays.TransparentMaterial(texture, color);
+        const int spots = 14;
+        const float radius = 24f;
+        const float half = 3f;
+        var vertices = new Vector3[spots * 4];
+        var uv = new Vector2[spots * 4];
+        var triangles = new int[spots * 6];
+        for (int i = 0; i < spots; i++)
+        {
+            float angle = Mathf.PI * 2f * i / spots;
+            float x = Mathf.Cos(angle) * radius;
+            float z = Mathf.Sin(angle) * radius;
+            int v = i * 4, t = i * 6;
+            vertices[v] = new Vector3(x - half, 0.9f, z - half);
+            vertices[v + 1] = new Vector3(x + half, 0.9f, z - half);
+            vertices[v + 2] = new Vector3(x - half, 0.9f, z + half);
+            vertices[v + 3] = new Vector3(x + half, 0.9f, z + half);
+            uv[v] = new Vector2(0, 0); uv[v + 1] = new Vector2(1, 0);
+            uv[v + 2] = new Vector2(0, 1); uv[v + 3] = new Vector2(1, 1);
+            triangles[t] = v; triangles[t + 1] = v + 2; triangles[t + 2] = v + 1;
+            triangles[t + 3] = v + 1; triangles[t + 4] = v + 2;
+            triangles[t + 5] = v + 3;
+        }
+        var mesh = new Mesh { name = "Factory ownership ring" };
+        mesh.vertices = vertices;
+        mesh.uv = uv;
+        mesh.triangles = triangles;
+        mesh.RecalculateNormals();
+        var ring = new GameObject("Factory ownership ring");
+        ring.transform.SetParent(building.transform, false);
+        ring.AddComponent<MeshFilter>().sharedMesh = mesh;
+        ring.AddComponent<MeshRenderer>().sharedMaterial = material;
     }
 
     private static int ChassisKind(string units)
@@ -929,6 +1008,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
         terrainVisualMesh.RecalculateNormals();
         terrainCollider.sharedMesh = null;
         terrainCollider.sharedMesh = terrainMesh;
+        BuildOverlays();
         foreach (GameObject entityRoot in entityRoots)
         {
             PbMapEntity entity = entityRoot.GetComponent<PbMapEntity>();

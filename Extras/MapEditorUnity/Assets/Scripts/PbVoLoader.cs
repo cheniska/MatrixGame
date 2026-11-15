@@ -69,6 +69,34 @@ public sealed class PbVoLoader
         return result;
     }
 
+    public Texture2D LoadTexture(string descriptor)
+    {
+        if (string.IsNullOrEmpty(descriptor)) return null;
+        string relative = descriptor.Split('?')[0].Replace('\\', '/');
+        int matrix = relative.IndexOf("Matrix/", StringComparison.OrdinalIgnoreCase);
+        if (matrix >= 0) relative = relative.Substring(matrix);
+        try
+        {
+            string candidate = Resolve(relative);
+            foreach (string extension in new[] { ".dds", ".png" })
+            {
+                string path = Path.ChangeExtension(candidate, extension);
+                if (!File.Exists(path)) continue;
+                if (textures.TryGetValue(path, out Texture2D cached)) return cached;
+                Texture2D texture = extension == ".dds" ? ReadDds(path) : ReadPng(path);
+                if (texture == null) continue;
+                textures[path] = texture;
+                LoadedTextures++;
+                return texture;
+            }
+        }
+        catch (Exception error)
+        {
+            Debug.LogWarning("Overlay texture failed: " + descriptor + " — " + error.Message);
+        }
+        return null;
+    }
+
     private string Resolve(string relative)
     {
         string normalized = relative.Replace('\\', '/');
@@ -281,17 +309,32 @@ public sealed class PbVoLoader
         string fourcc = System.Text.Encoding.ASCII.GetString(bytes, 84, 4);
         TextureFormat format;
         int blockSize;
+        bool luminanceAlpha = I(bytes, 88) == 16 && I(bytes, 92) == 255 &&
+                              I(bytes, 104) == 65280;
         if (fourcc == "DXT1") { format = TextureFormat.DXT1; blockSize = 8; }
         else if (fourcc == "DXT3") { format = TextureFormat.RGBA32; blockSize = 16; }
         else if (fourcc == "DXT5") { format = TextureFormat.DXT5; blockSize = 16; }
+        else if (luminanceAlpha) { format = TextureFormat.RGBA32; blockSize = 0; }
         else return null;
         if (width < 1 || height < 1 || width > 8192 || height > 8192)
             throw new InvalidDataException("Invalid DDS dimensions.");
-        int dataSize = checked(((width + 3) / 4) * ((height + 3) / 4) * blockSize);
+        int dataSize = luminanceAlpha ? checked(width * height * 2)
+            : checked(((width + 3) / 4) * ((height + 3) / 4) * blockSize);
         if (128L + dataSize > bytes.Length)
             throw new InvalidDataException("Truncated DDS texture.");
         byte[] payload;
         if (fourcc == "DXT3") payload = DecodeDxt3(bytes, width, height);
+        else if (luminanceAlpha)
+        {
+            payload = new byte[checked(width * height * 4)];
+            for (int i = 0; i < width * height; i++)
+            {
+                byte light = bytes[128 + i * 2];
+                int at = i * 4;
+                payload[at] = payload[at + 1] = payload[at + 2] = light;
+                payload[at + 3] = bytes[128 + i * 2 + 1];
+            }
+        }
         else
         {
             payload = new byte[dataSize];
