@@ -1,0 +1,5 @@
+add_executable(cmap_tool CMapTool.cpp)
+target_include_directories(cmap_tool PRIVATE ../../MatrixLib/Base/include)
+target_link_libraries(cmap_tool PRIVATE MatrixLib ZLIB)
+target_compile_options(cmap_tool PRIVATE ${COMPILE_OPTIONS})
+target_compile_definitions(cmap_tool PRIVATE ${COMPILE_DEFINITIONS})
