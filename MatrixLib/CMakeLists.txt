@@ -104,5 +104,9 @@ if(MSVC)
     source_group("Bitmap\\Header Files" FILES ${BITMAP_HEADERS})
 endif()
 
+if(MSVC)
+    set_source_files_properties(Bitmap/src/asharpen.asm PROPERTIES COMPILE_OPTIONS "/safeseh")
+endif()
+
 target_compile_options(MatrixLib PRIVATE ${COMPILE_OPTIONS})
 target_compile_definitions(MatrixLib PRIVATE ${COMPILE_DEFINITIONS})

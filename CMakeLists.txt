@@ -10,8 +10,13 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-option(MATRIXGAME_BUILD_DLL ON)
-option(MATRIXGAME_CHEATS OFF)
+option(MATRIXGAME_BUILD_DLL "Build MatrixGame as a DLL" ON)
+option(MATRIXGAME_CHEATS "Enable cheats" OFF)
+
+if(MSVC AND MSVC_VERSION GREATER_EQUAL 1900)
+    # Keep the engine's original /Zp1 layout with newer Windows SDK headers.
+    add_compile_definitions(WINDOWS_IGNORE_PACKING_MISMATCH)
+endif()
 
 if(MSVC)
     find_package(DIRECTX9 REQUIRED)
@@ -26,6 +31,9 @@ add_subdirectory(MatrixGame)
 if(MSVC)
     target_link_libraries(MatrixGame winmm.lib)
     target_link_libraries(MatrixGame ${DIRECTX9_LIBRARIES})
+    if(MSVC_VERSION GREATER_EQUAL 1900)
+        target_link_libraries(MatrixGame legacy_stdio_definitions.lib)
+    endif()
 
     set(COMPILE_OPTIONS
         $<$<CONFIG:Release>:/Zi /W3 /O2 /Ob2 /Oi /Ot /Oy /GF /EHsc /MT /Zp1 /GS- /Gy- /Gr>

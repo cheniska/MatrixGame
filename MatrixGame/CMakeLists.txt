@@ -31,6 +31,11 @@ target_sources(MatrixGame PRIVATE
 )
 target_include_directories(MatrixGame PRIVATE ./)
 
+# MSVC 2022 crashes while optimizing this translation unit.
+if(MSVC AND MSVC_VERSION GREATER_EQUAL 1930)
+    set_source_files_properties(src/MatrixLogic.cpp PROPERTIES COMPILE_OPTIONS "/Od")
+endif()
+
 add_matrix_directory(src/Effects)
 add_matrix_directory(src/Interface)
 add_matrix_directory(src/Logic)

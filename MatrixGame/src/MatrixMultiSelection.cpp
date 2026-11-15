@@ -9,6 +9,7 @@
 #include "MatrixRobot.hpp"
 #include "MatrixFlyer.hpp"
 #include "MatrixMapStatic.hpp"
+#include "MatrixObjectCannon.hpp"
 
 CMultiSelection * CMultiSelection::m_GameSelection;
 CMultiSelection * CMultiSelection::m_First;
