@@ -52,6 +52,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
     private readonly List<PbMapTile> tileRows = new List<PbMapTile>();
     private readonly HashSet<PbMapTile> selectedTiles = new HashSet<PbMapTile>();
     private PbMapTile primaryTile;
+    private Vector3 lastDecalClickPosition;
     private readonly HashSet<int> editedTerrain = new HashSet<int>();
     private bool terrainBrush;
     private bool perspective;
@@ -103,7 +104,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
         if (File.Exists(mapPath)) LoadMap();
         string smokeMode = Environment.GetEnvironmentVariable("PB_EDITOR_SMOKE");
         if (smokeMode == "preview" || smokeMode == "preview_target" ||
-            smokeMode == "preview_tile")
+            smokeMode == "preview_tile" || smokeMode == "preview_surface")
         {
             if (storage == null || voLoader.LoadedModels < 1)
             {
@@ -111,13 +112,16 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 Application.Quit(1);
                 return;
             }
-            if (smokeMode == "preview_tile")
+            if (smokeMode == "preview_tile" || smokeMode == "preview_surface")
             {
-                PbMapTile tile = tileRows[0];
+                PbMapTile tile = smokeMode == "preview_tile" ? tileRows[0] :
+                    overlayRoot.transform.Find("Surface 0").GetComponent<PbMapTile>();
                 SelectTile(tile, false);
-                Vector3 center = tile.GetComponent<MeshFilter>().sharedMesh.bounds.center;
+                Bounds bounds = tile.GetComponent<MeshFilter>().sharedMesh.bounds;
+                Vector3 center = bounds.center;
                 viewCamera.orthographic = true;
-                viewCamera.orthographicSize = 120f;
+                viewCamera.orthographicSize = Mathf.Max(120f, bounds.extents.x * 1.4f,
+                                                         bounds.extents.z * 1.4f);
                 viewCamera.transform.position = center + Vector3.up * 400f;
                 viewCamera.transform.rotation = Quaternion.Euler(90f, 0f, 0f);
             }
@@ -228,9 +232,28 @@ public sealed class PbStandaloneApp : MonoBehaviour
                     if (Vector2.Distance(mesh.uv[0], expected) > 0.001f)
                         throw new InvalidOperationException("Top tile rotation is invalid: " + row);
                 }
+                if (tileRows.Count != overlayTiles + overlaySurfaces)
+                    throw new InvalidOperationException("Decal selection list is incomplete.");
                 Transform surface = overlayRoot.transform.Find("Surface 0");
                 Mesh surfaceMesh = surface == null ? null : surface.GetComponent<MeshFilter>().sharedMesh;
-                if (surfaceMesh == null) throw new InvalidOperationException("Surface mesh is absent.");
+                PbMapTile surfaceIdentity = surface == null ? null : surface.GetComponent<PbMapTile>();
+                MeshCollider surfaceCollider = surface == null ? null : surface.GetComponent<MeshCollider>();
+                if (surfaceMesh == null || surfaceIdentity == null || surfaceCollider == null ||
+                    surfaceIdentity.Table != "surfaces" || surfaceIdentity.Row != 0)
+                    throw new InvalidOperationException("Surface selection target is absent.");
+                int[] surfaceTriangles = surfaceMesh.triangles;
+                Vector3[] surfaceVertices = surfaceMesh.vertices;
+                Vector3 surfaceCenter = (surfaceVertices[surfaceTriangles[0]] +
+                    surfaceVertices[surfaceTriangles[1]] +
+                    surfaceVertices[surfaceTriangles[2]]) / 3f;
+                Ray surfaceRay = new Ray(surfaceCenter + Vector3.up * 1000f, Vector3.down);
+                if (!surfaceCollider.Raycast(surfaceRay, out RaycastHit surfaceHit, 2000f))
+                    throw new InvalidOperationException("Surface cannot be picked.");
+                SelectTile(surfaceIdentity, false);
+                if (primaryTile != surfaceIdentity || selectedTiles.Count != 1 ||
+                    !TileRecord(surfaceIdentity).Contains("surfaces row 0"))
+                    throw new InvalidOperationException("Surface selection failed.");
+                ClearTileSelection();
                 int segments = Mathf.RoundToInt(Mathf.Sqrt(surfaceMesh.vertexCount)) - 1;
                 float x0 = storage.Float("surfaces", "X0", 0);
                 float x1 = storage.Float("surfaces", "X1", 0);
@@ -957,19 +980,30 @@ public sealed class PbStandaloneApp : MonoBehaviour
             Ray ray = viewCamera.ScreenPointToRay(Input.mousePosition);
             if (panelTab == 3)
             {
-                PbMapTile nearest = null;
-                float distance = float.PositiveInfinity;
-                foreach (RaycastHit tileHit in Physics.RaycastAll(ray, 10000f))
+                RaycastHit[] hits = Physics.RaycastAll(ray, 10000f);
+                Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
+                var hovered = new List<PbMapTile>();
+                foreach (RaycastHit tileHit in hits)
                 {
                     PbMapTile tile = tileHit.collider.GetComponent<PbMapTile>();
-                    if (tile != null && tileHit.distance < distance)
-                    {
-                        nearest = tile;
-                        distance = tileHit.distance;
-                    }
+                    if (tile != null && !hovered.Contains(tile)) hovered.Add(tile);
                 }
-                SelectTile(nearest, Input.GetKey(KeyCode.LeftShift) ||
-                                    Input.GetKey(KeyCode.RightShift));
+                bool additive = Input.GetKey(KeyCode.LeftShift) ||
+                                Input.GetKey(KeyCode.RightShift);
+                PbMapTile chosen = hovered.Count == 0 ? null : hovered[0];
+                if (additive)
+                {
+                    foreach (PbMapTile tile in hovered)
+                        if (!selectedTiles.Contains(tile)) { chosen = tile; break; }
+                }
+                else if (hovered.Count > 1 && primaryTile != null &&
+                         Vector3.Distance(lastDecalClickPosition, Input.mousePosition) < 6f)
+                {
+                    int previous = hovered.IndexOf(primaryTile);
+                    if (previous >= 0) chosen = hovered[(previous + 1) % hovered.Count];
+                }
+                lastDecalClickPosition = Input.mousePosition;
+                SelectTile(chosen, additive);
             }
             else if (terrainBrush && terrainCollider.Raycast(ray, out RaycastHit terrainHit, 10000f))
                 SculptTerrain(terrainHit.point, Input.GetKey(KeyCode.LeftShift) ? -1f : 1f);
@@ -1147,7 +1181,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
             primaryTile = tile;
             ShowTileOutline(tile);
         }
-        message = selectedTiles.Count + " tile(s) selected. Shift+click adds/removes; Copy IDs sends rows to clipboard.";
+        message = selectedTiles.Count + " decal(s) selected. Shift+click adds/removes; Copy IDs sends rows to clipboard.";
     }
 
     private void ClearTileSelection()
@@ -1190,10 +1224,17 @@ public sealed class PbStandaloneApp : MonoBehaviour
         line.enabled = true;
     }
 
-    private string TileRecord(PbMapTile tile) =>
-        Path.GetFileName(mapPath) + " | toptextures row " + tile.Row +
-        " | X=" + tile.X + " Y=" + tile.Y + " Flags=" + tile.Flags +
-        " | " + tile.Descriptor;
+    private string TileRecord(PbMapTile tile)
+    {
+        string position = tile.Table == "toptextures"
+            ? "X=" + tile.X + " Y=" + tile.Y
+            : "X0=" + storage.Float("surfaces", "X0", tile.Row).ToString("0.##",
+                System.Globalization.CultureInfo.InvariantCulture) +
+              " Y0=" + storage.Float("surfaces", "Y0", tile.Row).ToString("0.##",
+                System.Globalization.CultureInfo.InvariantCulture);
+        return Path.GetFileName(mapPath) + " | " + tile.Table + " row " + tile.Row +
+               " | " + position + " Flags=" + tile.Flags + " | " + tile.Descriptor;
+    }
 
     private void Highlight(GameObject root)
     {
@@ -1322,8 +1363,8 @@ public sealed class PbStandaloneApp : MonoBehaviour
         if (GUI.Button(new Rect(Screen.width - 85, 79, 75, 23), "Reload")) ReloadModels();
         GUI.Label(new Rect(10, 106, Screen.width - 20, 22), message);
         GUI.Label(new Rect(10, 128, Screen.width - 20, 20), perspective
-            ? "3D: right drag orbit | WASD pan | Q/E height | wheel zoom | C top | Tiles tab: click to select"
-            : "Top: WASD/arrows pan | wheel zoom | C 3D | Tiles tab: click tile, Shift+click adds more");
+            ? "3D: right drag orbit | WASD pan | Q/E height | wheel zoom | C top | Decals tab: click to select"
+            : "Top: WASD/arrows pan | wheel zoom | C 3D | Decals tab: click decal, Shift+click adds more");
         DrawSidebar();
     }
 
@@ -1333,7 +1374,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
         float top = 155;
         float panelHeight = Screen.height - top;
         GUI.Box(new Rect(left, top, 310, panelHeight), "Map tools");
-        string[] tabs = { "Brushes", "Entities", "Players", "Tiles" };
+        string[] tabs = { "Brushes", "Entities", "Players", "Decals" };
         for (int i = 0; i < tabs.Length; i++)
             if (GUI.Button(new Rect(left + 10 + i * 73, top + 24, 72, 26), tabs[i]))
             {
@@ -1350,16 +1391,16 @@ public sealed class PbStandaloneApp : MonoBehaviour
     private void DrawTilePanel(float left, float top)
     {
         GUI.Label(new Rect(left + 10, top, 290, 22),
-                  "Selected " + selectedTiles.Count + " / " + tileRows.Count + " top tiles");
+                  "Selected " + selectedTiles.Count + " / " + tileRows.Count + " decals");
         if (primaryTile != null)
         {
             GUI.Label(new Rect(left + 10, top + 25, 290, 22),
-                      "Row " + primaryTile.Row + " | Flags " + primaryTile.Flags +
-                      " | X " + primaryTile.X + " Y " + primaryTile.Y);
+                      primaryTile.Table + " row " + primaryTile.Row +
+                      " | Flags " + primaryTile.Flags);
             GUI.Label(new Rect(left + 10, top + 49, 290, 32), primaryTile.Descriptor);
         }
         else GUI.Label(new Rect(left + 10, top + 25, 290, 45),
-                       "Click a tile on the map or select a row below.");
+                       "Click a decal on the map or select a row below.");
         if (GUI.Button(new Rect(left + 10, top + 82, 94, 25), "Copy IDs"))
         {
             var chosen = new List<PbMapTile>(selectedTiles);
@@ -1367,7 +1408,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
             var lines = new List<string>();
             foreach (PbMapTile tile in chosen) lines.Add(TileRecord(tile));
             GUIUtility.systemCopyBuffer = string.Join(Environment.NewLine, lines.ToArray());
-            message = "Copied " + chosen.Count + " tile ID(s) to clipboard.";
+            message = "Copied " + chosen.Count + " decal ID(s) to clipboard.";
         }
         if (GUI.Button(new Rect(left + 107, top + 82, 94, 25), "Focus") && primaryTile != null)
         {
@@ -1401,7 +1442,8 @@ public sealed class PbStandaloneApp : MonoBehaviour
             if (y + 26 >= tileScroll.y && y <= tileScroll.y + listHeight)
             {
                 string name = tile.Descriptor.Split('?')[0].Replace('\\', '/');
-                string label = tile.Row + " | F" + tile.Flags + " | " +
+                string label = (tile.Table == "toptextures" ? "T" : "S") +
+                    tile.Row + " | F" + tile.Flags + " | " +
                     Path.GetFileName(name);
                 if (GUI.Button(new Rect(0, y, 270, 25), label))
                     SelectTile(tile, Event.current.shift);

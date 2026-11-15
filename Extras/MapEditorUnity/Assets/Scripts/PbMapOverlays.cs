@@ -132,6 +132,7 @@ public sealed class PbMapOverlays
             }
         GameObject tile = AddMesh("Top tile " + row, vertices, uv, triangles, material);
         var identity = tile.AddComponent<PbMapTile>();
+        identity.Table = "toptextures";
         identity.Row = row;
         identity.X = x;
         identity.Y = y;
@@ -184,7 +185,19 @@ public sealed class PbMapOverlays
             material = TransparentMaterial(loader.LoadTexture(descriptor),
                 new Color32((byte)(tint >> 16), (byte)(tint >> 8),
                             (byte)tint, (byte)(tint >> 24)));
-        AddMesh("Surface " + row, vertices, uv, triangles, material);
+        GameObject surface = AddMesh("Surface " + row, vertices, uv, triangles, material);
+        var identity = surface.AddComponent<PbMapTile>();
+        identity.Table = "surfaces";
+        identity.Row = row;
+        identity.Flags = storage.Int("surfaces", "Flags", row, 1);
+        identity.Descriptor = descriptor;
+        identity.CellsX = segments;
+        identity.CellsY = segments;
+        var pickMesh = new Mesh { name = "Surface " + row + " pick" };
+        pickMesh.vertices = new[] { vertices[0], vertices[segments],
+            vertices[segments * stride + segments], vertices[segments * stride] };
+        pickMesh.triangles = new[] { 0, 1, 3, 1, 2, 3 };
+        surface.AddComponent<MeshCollider>().sharedMesh = pickMesh;
     }
 
     private GameObject AddMesh(string name, Vector3[] vertices, Vector2[] uv,
@@ -228,6 +241,7 @@ public sealed class PbMapOverlays
 
 public sealed class PbMapTile : MonoBehaviour
 {
+    public string Table;
     public int Row;
     public int X;
     public int Y;
