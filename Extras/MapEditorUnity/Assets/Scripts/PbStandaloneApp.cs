@@ -134,8 +134,13 @@ public sealed class PbStandaloneApp : MonoBehaviour
             }
             else if (smokeMode == "preview_target")
             {
+                int previewRow = -1;
+                string requestedRow = Environment.GetEnvironmentVariable("PB_EDITOR_PREVIEW_ROW");
+                if (!string.IsNullOrEmpty(requestedRow))
+                    int.TryParse(requestedRow, out previewRow);
                 PbPlacedObject target = objects.Find(item => item.TypeIndex >= 0 &&
                     item.TypeIndex < typeData.Count &&
+                    (previewRow < 0 || item.Row == previewRow) &&
                     typeData[item.TypeIndex].IndexOf("robotarget.vo",
                         StringComparison.OrdinalIgnoreCase) >= 0);
                 if (target == null) throw new InvalidOperationException("Target model is absent.");
@@ -301,6 +306,11 @@ public sealed class PbStandaloneApp : MonoBehaviour
             }
             if (smokeMode == "geometry")
             {
+                Vector3 forwardAt90 = PbCoordinates.Rotation(Mathf.PI / 2f, 0f, 0f) *
+                    PbCoordinates.Direction(0f, 1f, 0f);
+                if (Vector3.Distance(forwardAt90,
+                    PbCoordinates.Direction(-1f, 0f, 0f)) > 0.001f)
+                    throw new InvalidOperationException("Game and editor axes disagree at 90 degrees.");
                 PbPlacedObject item = objects.Find(o => o.GetComponentInChildren<BoxCollider>() != null);
                 if (item == null) throw new InvalidOperationException("No object pick collider.");
                 item.Rotate(15f, 10f, -10f);
@@ -318,6 +328,20 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 Vector3[] normals = terrainVisualMesh.normals;
                 if (Vector3.Distance(normals[2], normals[4]) > 0.001f)
                     throw new InvalidOperationException("Terrain cell normals are discontinuous.");
+                GameObject baseRoot = entityRoots.Find(root =>
+                    root.GetComponent<PbMapEntity>().Table == "buildings" &&
+                    root.GetComponent<PbMapEntity>().Kind == 0);
+                GameObject factoryRoot = entityRoots.Find(root =>
+                    root.GetComponent<PbMapEntity>().Table == "buildings" &&
+                    root.GetComponent<PbMapEntity>().Kind != 0);
+                if (baseRoot != null && baseRoot.transform.childCount < 7)
+                    throw new InvalidOperationException("Base elevator group is incomplete.");
+                if (factoryRoot != null && factoryRoot.transform.childCount < 3)
+                    throw new InvalidOperationException("Factory capture platform is absent.");
+                if (baseRoot != null) baseRoot.transform.Rotate(0f, 90f, 0f);
+                GameObject cannonRoot = entityRoots.Find(root =>
+                    root.GetComponent<PbMapEntity>().Table == "cannons");
+                if (cannonRoot != null) cannonRoot.transform.Rotate(0f, 15f, 0f);
             }
             if (smokeMode == "camera")
             {
@@ -356,6 +380,27 @@ public sealed class PbStandaloneApp : MonoBehaviour
                     check.Float("objects", "AngleY", item.Row));
                 if (Quaternion.Angle(saved, item.transform.rotation) > 0.1f)
                     throw new InvalidOperationException("Three-axis rotation did not round-trip.");
+                GameObject baseRoot = entityRoots.Find(root =>
+                    root.GetComponent<PbMapEntity>().Table == "buildings" &&
+                    root.GetComponent<PbMapEntity>().Kind == 0);
+                if (baseRoot != null)
+                {
+                    int row = baseRoot.GetComponent<PbMapEntity>().Row;
+                    if (check.Int("buildings", "Angle", row) !=
+                        (storage.Int("buildings", "Angle", row) + 1) % 4)
+                        throw new InvalidOperationException("Base angle did not round-trip.");
+                }
+                GameObject cannonRoot = entityRoots.Find(root =>
+                    root.GetComponent<PbMapEntity>().Table == "cannons");
+                if (cannonRoot != null)
+                {
+                    int row = cannonRoot.GetComponent<PbMapEntity>().Row;
+                    float expected = storage.Float("cannons", "Angle", row) +
+                        15f * Mathf.Deg2Rad;
+                    if (Mathf.Abs(Mathf.DeltaAngle(expected * Mathf.Rad2Deg,
+                        check.Float("cannons", "Angle", row) * Mathf.Rad2Deg)) > 0.1f)
+                        throw new InvalidOperationException("Cannon angle did not round-trip.");
+                }
             }
             if (smokeMode == "players")
             {
@@ -601,7 +646,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
         root.transform.SetParent(mapRoot.transform);
         root.transform.position = new Vector3(MapX(cellX),
             SampleTerrainHeight(cellX, cellY) + extraHeight, cellY * CellSize);
-        root.transform.rotation = Quaternion.Euler(0, -angle, 0);
+        root.transform.rotation = Quaternion.Euler(0, angle, 0);
         var info = root.AddComponent<PbMapEntity>();
         info.Table = table;
         info.Row = row;
@@ -620,7 +665,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
     {
         if (entity.Table == "buildings")
         {
-            AttachEntityModel(root, "Matrix/Building/b" + entity.Kind + ".vo", Vector3.zero);
+            AttachBuildingGroup(root, entity.Kind);
             if (entity.Kind != 0) AttachCaptureRing(root, entity.Side);
             return;
         }
@@ -641,6 +686,35 @@ public sealed class PbStandaloneApp : MonoBehaviour
             return;
         }
         if (entity.Table == "robots") AttachRobotParts(root, entity);
+    }
+
+    private void AttachBuildingGroup(GameObject root, int kind)
+    {
+        string directory = Path.Combine(modelRoot, "Matrix", "Building");
+        string path = Path.Combine(directory, "b" + kind + ".cvo");
+        if (!File.Exists(path))
+        {
+            AttachEntityModel(root, "Matrix/Building/b" + kind + ".vo", Vector3.zero);
+            return;
+        }
+        string model = null, texture = null;
+        int parts = 0;
+        foreach (string raw in File.ReadAllLines(path))
+        {
+            string line = raw.Split(new[] { "//" }, StringSplitOptions.None)[0].Trim();
+            if (line.Contains("{")) { model = null; texture = null; }
+            if (line.StartsWith("Model=", StringComparison.OrdinalIgnoreCase))
+                model = line.Substring(6).Trim().Split('?')[0];
+            if (line.StartsWith("Texture=", StringComparison.OrdinalIgnoreCase))
+                texture = line.Substring(8).Trim();
+            if (!line.Contains("}") || string.IsNullOrEmpty(model)) continue;
+            string descriptor = "Matrix/Building/" + model;
+            if (!string.IsNullOrEmpty(texture)) descriptor += "?Tex=" + texture;
+            AttachEntityModel(root, descriptor, Vector3.zero);
+            parts++;
+        }
+        if (parts == 0)
+            AttachEntityModel(root, "Matrix/Building/b" + kind + ".vo", Vector3.zero);
     }
 
     private void AttachRobotParts(GameObject root, PbMapEntity entity)
@@ -815,6 +889,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
         mesh.RecalculateNormals();
         var ring = new GameObject("Factory ownership ring");
         ring.transform.SetParent(building.transform, false);
+        ring.transform.localPosition = new Vector3(0f, 0.8f, 2.7f);
         ring.AddComponent<MeshFilter>().sharedMesh = mesh;
         ring.AddComponent<MeshRenderer>().sharedMaterial = material;
     }
@@ -864,8 +939,8 @@ public sealed class PbStandaloneApp : MonoBehaviour
         message = "Added object type " + activeType + "; save as a new .map.";
     }
 
-    private float MapX(float cellX) => (width - cellX) * CellSize;
-    private float CellX(float worldX) => width - worldX / CellSize;
+    private float MapX(float cellX) => PbCoordinates.MapX(cellX, width, CellSize);
+    private float CellX(float worldX) => PbCoordinates.CellX(worldX, width, CellSize);
 
     private void DeleteSelected()
     {
@@ -1111,8 +1186,8 @@ public sealed class PbStandaloneApp : MonoBehaviour
             if (Input.GetKeyDown(KeyCode.PageUp)) move.y += 1f;
             if (Input.GetKeyDown(KeyCode.PageDown)) move.y -= 1f;
             selected.transform.position += move;
-            if (Input.GetKeyDown(KeyCode.Comma)) selected.Rotate(15f, 0f, 0f);
-            if (Input.GetKeyDown(KeyCode.Period)) selected.Rotate(-15f, 0f, 0f);
+            if (Input.GetKeyDown(KeyCode.Comma)) selected.Rotate(-15f, 0f, 0f);
+            if (Input.GetKeyDown(KeyCode.Period)) selected.Rotate(15f, 0f, 0f);
             if (Input.GetKeyDown(KeyCode.U)) selected.Rotate(0f, 15f, 0f);
             if (Input.GetKeyDown(KeyCode.O)) selected.Rotate(0f, -15f, 0f);
             if (Input.GetKeyDown(KeyCode.N)) selected.Rotate(0f, 0f, -15f);
@@ -1413,7 +1488,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 }
                 if (turned)
                     edited.SetInt("buildings", "Angle", item.Row,
-                                  ((Mathf.RoundToInt(-root.transform.eulerAngles.y / 90f) % 4) + 4) % 4);
+                                  ((Mathf.RoundToInt(root.transform.eulerAngles.y / 90f) % 4) + 4) % 4);
             }
             else
             {
@@ -1428,7 +1503,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 {
                     if (turned)
                         edited.SetFloat("cannons", "Angle", item.Row,
-                            -Mathf.DeltaAngle(0f, root.transform.eulerAngles.y) * Mathf.Deg2Rad);
+                            Mathf.DeltaAngle(0f, root.transform.eulerAngles.y) * Mathf.Deg2Rad);
                     if (raised) edited.SetFloat("cannons", "AddH", item.Row, item.ExtraHeight);
                 }
             }

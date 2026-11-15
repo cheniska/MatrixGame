@@ -81,7 +81,7 @@ public static class PbObjectWriter
         Vector3 p = item.transform.position;
         if (!Finite(p.x) || !Finite(p.y) || !Finite(p.z))
             throw new InvalidDataException("Nonfinite object position.");
-        float xx = mapWidth - p.x / cellSize;
+        float xx = PbCoordinates.CellX(p.x, mapWidth, cellSize);
         float yy = p.z / cellSize;
         x = Mathf.FloorToInt(xx);
         y = Mathf.FloorToInt(yy);
@@ -138,7 +138,7 @@ public static class PbObjectWriter
         float middle = Mathf.Asin(Mathf.Clamp(m.m10, -1f, 1f));
         float yaw = Mathf.Atan2(-m.m20, m.m00);
         float roll = Mathf.Atan2(-m.m12, m.m11);
-        z = -yaw;
+        z = yaw;
         x = -roll;
         y = middle;
         if (!Finite(z) || !Finite(x) || !Finite(y))

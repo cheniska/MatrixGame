@@ -11,9 +11,7 @@ public sealed class PbPlacedObject : MonoBehaviour
     public float AngleY;
 
     public static Quaternion Rotation(float z, float x, float y) =>
-        Quaternion.AngleAxis(-z * Mathf.Rad2Deg, Vector3.up) *
-        Quaternion.AngleAxis(y * Mathf.Rad2Deg, Vector3.forward) *
-        Quaternion.AngleAxis(-x * Mathf.Rad2Deg, Vector3.right);
+        PbCoordinates.Rotation(z, x, y);
 
     public void Rotate(float z, float x, float y)
     {

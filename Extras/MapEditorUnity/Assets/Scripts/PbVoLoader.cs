@@ -135,10 +135,10 @@ public sealed class PbVoLoader
         for (int i = 0; i < vertexCount; i++)
         {
             int offset = i * 32;
-            vertices[i] = new Vector3(F(vertexBytes, offset), F(vertexBytes, offset + 8),
-                                      F(vertexBytes, offset + 4));
-            normals[i] = new Vector3(F(vertexBytes, offset + 12), F(vertexBytes, offset + 20),
-                                     F(vertexBytes, offset + 16));
+            vertices[i] = PbCoordinates.Direction(F(vertexBytes, offset),
+                F(vertexBytes, offset + 4), F(vertexBytes, offset + 8));
+            normals[i] = PbCoordinates.Direction(F(vertexBytes, offset + 12),
+                F(vertexBytes, offset + 16), F(vertexBytes, offset + 20));
             uvs[i] = new Vector2(F(vertexBytes, offset + 24), 1f - F(vertexBytes, offset + 28));
         }
         var groups = new List<int>[surfaceCount];
@@ -170,10 +170,10 @@ public sealed class PbVoLoader
                 int c = vertexBase + U16(indexBytes, at + 4);
                 if (a >= vertexCount || b >= vertexCount || c >= vertexCount)
                     throw new InvalidDataException("VO triangle exceeds vertex array.");
-                // MatrixGame uses Z-up. Swapping Y and Z reverses winding.
+                // Mirroring X and swapping Y/Z together preserve winding.
                 groups[surface].Add(a);
-                groups[surface].Add(c);
                 groups[surface].Add(b);
+                groups[surface].Add(c);
             }
         }
         var mesh = new Mesh { name = Path.GetFileNameWithoutExtension(path) };
@@ -253,11 +253,11 @@ public sealed class PbVoLoader
                 int at = frame * 64;
                 // D3DX uses row vectors and Z up; Unity uses column vectors and Y up.
                 var m = new Matrix4x4();
-                m.SetRow(0, new Vector4(F(data, at), F(data, at + 32),
-                                        F(data, at + 16), F(data, at + 48)));
-                m.SetRow(1, new Vector4(F(data, at + 8), F(data, at + 40),
+                m.SetRow(0, new Vector4(F(data, at), -F(data, at + 32),
+                                        -F(data, at + 16), -F(data, at + 48)));
+                m.SetRow(1, new Vector4(-F(data, at + 8), F(data, at + 40),
                                         F(data, at + 24), F(data, at + 56)));
-                m.SetRow(2, new Vector4(F(data, at + 4), F(data, at + 36),
+                m.SetRow(2, new Vector4(-F(data, at + 4), F(data, at + 36),
                                         F(data, at + 20), F(data, at + 52)));
                 m.SetRow(3, new Vector4(0, 0, 0, 1));
                 attachments[id] = m;
