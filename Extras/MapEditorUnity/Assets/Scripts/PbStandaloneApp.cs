@@ -184,19 +184,32 @@ public sealed class PbStandaloneApp : MonoBehaviour
                     Mathf.Abs(tileMesh.bounds.size.x -
                         tileTexture.width / 64f * CellSize) > 0.01f)
                     throw new InvalidOperationException("Overlay scale or alpha shader is invalid.");
+                for (int row = 0; row < overlayTiles; row++)
+                {
+                    Transform top = overlayRoot.transform.Find("Top tile " + row);
+                    Mesh mesh = top == null ? null : top.GetComponent<MeshFilter>().sharedMesh;
+                    if (mesh == null) throw new InvalidOperationException("Top tile mesh is absent.");
+                    int flags = storage.Int("toptextures", "Flags", row, 1);
+                    Vector2 expected = new[] { new Vector2(0f, 0f), new Vector2(0f, 1f),
+                        new Vector2(1f, 1f), new Vector2(1f, 0f) }[flags & 3];
+                    if ((flags & 1024) != 0) expected.x = 1f - expected.x;
+                    if ((flags & 2048) != 0) expected.y = 1f - expected.y;
+                    if (Vector2.Distance(mesh.uv[0], expected) > 0.001f)
+                        throw new InvalidOperationException("Top tile rotation is invalid: " + row);
+                }
                 Transform surface = overlayRoot.transform.Find("Surface 0");
                 Mesh surfaceMesh = surface == null ? null : surface.GetComponent<MeshFilter>().sharedMesh;
                 if (surfaceMesh == null) throw new InvalidOperationException("Surface mesh is absent.");
                 int segments = Mathf.RoundToInt(Mathf.Sqrt(surfaceMesh.vertexCount)) - 1;
                 float x0 = storage.Float("surfaces", "X0", 0);
-                float x3 = storage.Float("surfaces", "X3", 0);
-                float expectedX = width * CellSize - Mathf.Lerp(x0, x3, 1f / segments);
+                float x1 = storage.Float("surfaces", "X1", 0);
+                float expectedX = width * CellSize - Mathf.Lerp(x0, x1, 1f / segments);
                 if (Mathf.Abs(surfaceMesh.vertices[1].x - expectedX) > 0.01f)
                     throw new InvalidOperationException("Surface corner orientation is invalid.");
                 float texK = storage.Float("surfaces", "TexK", 0);
-                if (Vector2.Distance(surfaceMesh.uv[0], new Vector2(texK, 0f)) > 0.001f ||
-                    Vector2.Distance(surfaceMesh.uv[1], new Vector2(texK, texK / segments)) > 0.001f)
-                    throw new InvalidOperationException("Surface texture quarter-turn is invalid.");
+                if (Vector2.Distance(surfaceMesh.uv[0], Vector2.zero) > 0.001f ||
+                    Vector2.Distance(surfaceMesh.uv[1], new Vector2(texK / segments, 0f)) > 0.001f)
+                    throw new InvalidOperationException("Surface texture corner order is invalid.");
             }
             if (smokeMode == "entities")
             {

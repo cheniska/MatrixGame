@@ -115,7 +115,7 @@ public sealed class PbMapOverlays
                     (float)v / cellsY), flags & 3);
                 if ((flags & 1024) != 0) coordinate.x = 1f - coordinate.x;
                 if ((flags & 2048) != 0) coordinate.y = 1f - coordinate.y;
-                uv[index] = CorrectDecalUv(coordinate, 1f);
+                uv[index] = coordinate;
             }
         int t = 0;
         for (int v = 0; v < cellsY; v++)
@@ -149,12 +149,12 @@ public sealed class PbMapOverlays
             for (int u = 0; u <= segments; u++)
             {
                 float fu = (float)u / segments, fv = (float)v / segments;
-                Vector2 a = Vector2.Lerp(corners[0], corners[3], fu);
-                Vector2 b = Vector2.Lerp(corners[1], corners[2], fu);
+                Vector2 a = Vector2.Lerp(corners[0], corners[1], fu);
+                Vector2 b = Vector2.Lerp(corners[3], corners[2], fu);
                 Vector2 point = Vector2.Lerp(a, b, fv);
                 int index = v * stride + u;
                 vertices[index] = World(point.x / cellSize, point.y / cellSize, 0.75f);
-                uv[index] = CorrectDecalUv(new Vector2(fu * texK, fv * texK), texK);
+                uv[index] = new Vector2(fu * texK, fv * texK);
             }
         int t = 0;
         for (int v = 0; v < segments; v++)
@@ -210,8 +210,4 @@ public sealed class PbMapOverlays
         return uv;
     }
 
-    // The editor's map axes and Unity texture axes differ by a quarter turn.
-    // Apply this after the map's own rotation/mirror flags to both overlay kinds.
-    private static Vector2 CorrectDecalUv(Vector2 uv, float repeat) =>
-        new Vector2(repeat - uv.y, uv.x);
 }
