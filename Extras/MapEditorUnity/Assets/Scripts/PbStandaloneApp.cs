@@ -173,6 +173,26 @@ public sealed class PbStandaloneApp : MonoBehaviour
                     root.GetComponent<PbMapEntity>().Kind != 0);
                 if (factory != null && factory.transform.Find("Factory ownership ring") == null)
                     throw new InvalidOperationException("Factory ownership ring is absent.");
+                Transform tile = overlayRoot.transform.Find("Top tile 0");
+                Mesh tileMesh = tile == null ? null : tile.GetComponent<MeshFilter>().sharedMesh;
+                Material tileMaterial = tile == null ? null : tile.GetComponent<MeshRenderer>().sharedMaterial;
+                Texture2D tileTexture = voLoader.LoadTexture(
+                    storage.String("toptextures", "Name", 0));
+                if (tileMesh == null || tileMaterial == null ||
+                    tileMaterial.shader.name != "PB/Overlay" ||
+                    tileTexture == null || tileTexture.width <= 0 ||
+                    Mathf.Abs(tileMesh.bounds.size.x -
+                        tileTexture.width / 64f * CellSize) > 0.01f)
+                    throw new InvalidOperationException("Overlay scale or alpha shader is invalid.");
+                Transform surface = overlayRoot.transform.Find("Surface 0");
+                Mesh surfaceMesh = surface == null ? null : surface.GetComponent<MeshFilter>().sharedMesh;
+                if (surfaceMesh == null) throw new InvalidOperationException("Surface mesh is absent.");
+                int segments = Mathf.RoundToInt(Mathf.Sqrt(surfaceMesh.vertexCount)) - 1;
+                float x0 = storage.Float("surfaces", "X0", 0);
+                float x3 = storage.Float("surfaces", "X3", 0);
+                float expectedX = width * CellSize - Mathf.Lerp(x0, x3, 1f / segments);
+                if (Mathf.Abs(surfaceMesh.vertices[1].x - expectedX) > 0.01f)
+                    throw new InvalidOperationException("Surface corner orientation is invalid.");
             }
             if (smokeMode == "entities")
             {

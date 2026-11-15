@@ -27,6 +27,7 @@ public sealed class PbVoLoader
         new Dictionary<string, Asset>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Texture2D> textures =
         new Dictionary<string, Texture2D>(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<Texture2D> cutoutTextures = new HashSet<Texture2D>();
     public int LoadedModels { get; private set; }
     public int MissingModels { get; private set; }
     public readonly List<string> MissingModelPaths = new List<string>();
@@ -201,6 +202,16 @@ public sealed class PbVoLoader
             material.name = mesh.name + " surface " + i;
             material.color = texture == null ? new Color(0.72f, 0.72f, 0.68f) : Color.white;
             material.mainTexture = texture;
+            if (texture != null && cutoutTextures.Contains(texture))
+            {
+                material.SetFloat("_Mode", 1f);
+                material.SetFloat("_Cutoff", 0.5f);
+                material.SetInt("_SrcBlend", (int)BlendMode.One);
+                material.SetInt("_DstBlend", (int)BlendMode.Zero);
+                material.SetInt("_ZWrite", 1);
+                material.EnableKeyword("_ALPHATEST_ON");
+                material.renderQueue = 2450;
+            }
             // Raw DDS rows keep DirectX's top-down layout. Unity's PNG decoder
             // already handles image orientation, so only DDS needs this correction.
             if (texture != null && texture.name.EndsWith(".dds", StringComparison.OrdinalIgnoreCase))
@@ -298,7 +309,7 @@ public sealed class PbVoLoader
         return texture;
     }
 
-    private static Texture2D ReadDds(string path)
+    private Texture2D ReadDds(string path)
     {
         byte[] bytes = File.ReadAllBytes(path);
         if (bytes.Length < 128 || bytes[0] != 'D' || bytes[1] != 'D' ||
@@ -311,7 +322,7 @@ public sealed class PbVoLoader
         int blockSize;
         bool luminanceAlpha = I(bytes, 88) == 16 && I(bytes, 92) == 255 &&
                               I(bytes, 104) == 65280;
-        if (fourcc == "DXT1") { format = TextureFormat.DXT1; blockSize = 8; }
+        if (fourcc == "DXT1") { format = TextureFormat.RGBA32; blockSize = 8; }
         else if (fourcc == "DXT3") { format = TextureFormat.RGBA32; blockSize = 16; }
         else if (fourcc == "DXT5") { format = TextureFormat.DXT5; blockSize = 16; }
         else if (luminanceAlpha) { format = TextureFormat.RGBA32; blockSize = 0; }
@@ -323,7 +334,8 @@ public sealed class PbVoLoader
         if (128L + dataSize > bytes.Length)
             throw new InvalidDataException("Truncated DDS texture.");
         byte[] payload;
-        if (fourcc == "DXT3") payload = DecodeDxt3(bytes, width, height);
+        if (fourcc == "DXT1") payload = DecodeDxt1(bytes, width, height);
+        else if (fourcc == "DXT3") payload = DecodeDxt3(bytes, width, height);
         else if (luminanceAlpha)
         {
             payload = new byte[checked(width * height * 4)];
@@ -342,6 +354,9 @@ public sealed class PbVoLoader
         }
         var texture = new Texture2D(width, height, format, false);
         texture.LoadRawTextureData(payload);
+        if (fourcc == "DXT1")
+            for (int i = 3; i < payload.Length; i += 4)
+                if (payload[i] < 255) { cutoutTextures.Add(texture); break; }
         texture.Apply(false, true);
         texture.name = Path.GetFileName(path);
         return texture;
@@ -377,6 +392,49 @@ public sealed class PbVoLoader
                         rgba[output + 2] = color.b;
                         rgba[output + 3] = (byte)(((source[at + pixel / 2] >>
                             ((pixel & 1) * 4)) & 15) * 17);
+                    }
+            }
+        return rgba;
+    }
+
+    private static byte[] DecodeDxt1(byte[] source, int width, int height)
+    {
+        var rgba = new byte[checked(width * height * 4)];
+        int blocksX = (width + 3) / 4;
+        int blocksY = (height + 3) / 4;
+        for (int by = 0; by < blocksY; by++)
+            for (int bx = 0; bx < blocksX; bx++)
+            {
+                int at = 128 + (by * blocksX + bx) * 8;
+                int c0 = U16(source, at);
+                int c1 = U16(source, at + 2);
+                uint indices = BitConverter.ToUInt32(source, at + 4);
+                var colors = new Color32[4];
+                colors[0] = Rgb565(c0);
+                colors[1] = Rgb565(c1);
+                if (c0 > c1)
+                {
+                    colors[2] = Blend(colors[0], colors[1], 2, 1);
+                    colors[3] = Blend(colors[0], colors[1], 1, 2);
+                }
+                else
+                {
+                    colors[2] = new Color32((byte)((colors[0].r + colors[1].r) / 2),
+                        (byte)((colors[0].g + colors[1].g) / 2),
+                        (byte)((colors[0].b + colors[1].b) / 2), 255);
+                    colors[3] = new Color32(0, 0, 0, 0);
+                }
+                for (int y = 0; y < 4; y++)
+                    for (int x = 0; x < 4; x++)
+                    {
+                        int px = bx * 4 + x, py = by * 4 + y;
+                        if (px >= width || py >= height) continue;
+                        Color32 color = colors[(int)((indices >> (2 * (y * 4 + x))) & 3)];
+                        int output = (py * width + px) * 4;
+                        rgba[output] = color.r;
+                        rgba[output + 1] = color.g;
+                        rgba[output + 2] = color.b;
+                        rgba[output + 3] = color.a;
                     }
             }
         return rgba;
