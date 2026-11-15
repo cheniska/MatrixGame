@@ -177,6 +177,11 @@ public sealed class PbStandaloneApp : MonoBehaviour
 
     private void Update()
     {
+        if (Input.GetKeyDown(KeyCode.Escape))
+        {
+            Application.Quit();
+            return;
+        }
         if (storage == null) return;
         float pan = viewCamera.orthographicSize * 0.8f * Time.deltaTime;
         Vector3 offset = Vector3.zero;
@@ -270,6 +275,8 @@ public sealed class PbStandaloneApp : MonoBehaviour
     private void OnGUI()
     {
         GUI.Box(new Rect(0, 0, Screen.width, 125), "PB Map Editor - standalone prototype");
+        if (GUI.Button(new Rect(Screen.width - 85, 1, 75, 20), "Exit"))
+            Application.Quit();
         GUI.Label(new Rect(10, 24, 85, 22), "Source .map:");
         mapPath = GUI.TextField(new Rect(100, 23, Screen.width - 190, 23), mapPath);
         if (GUI.Button(new Rect(Screen.width - 85, 23, 75, 23), "Load")) LoadMap();
