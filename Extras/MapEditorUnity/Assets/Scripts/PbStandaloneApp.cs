@@ -181,6 +181,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 if (tileMesh == null || tileMaterial == null ||
                     tileMaterial.shader.name != "PB/Overlay" ||
                     tileTexture == null || tileTexture.width <= 0 ||
+                    tileMaterial.mainTextureScale.y != 1f ||
                     Mathf.Abs(tileMesh.bounds.size.x -
                         tileTexture.width / 64f * CellSize) > 0.01f)
                     throw new InvalidOperationException("Overlay scale or alpha shader is invalid.");

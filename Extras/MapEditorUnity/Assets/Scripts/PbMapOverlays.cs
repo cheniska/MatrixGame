@@ -37,7 +37,9 @@ public sealed class PbMapOverlays
         for (int row = 0; row < count; row++)
         {
             string descriptor = storage.String("toptextures", "Name", row);
-            Material material = MaterialFor(descriptor);
+            // Compiled .cmap UVs address DDS rows directly. Flipping V here
+            // reverses the visible direction of quarter-turns in Flags.
+            Material material = MaterialFor(descriptor, false);
             if (material == null) { Missing++; continue; }
             int x = storage.Int("toptextures", "X", row);
             int y = storage.Int("toptextures", "Y", row);
@@ -49,24 +51,26 @@ public sealed class PbMapOverlays
         for (int row = 0; row < count; row++)
         {
             string descriptor = storage.String("surfaces", "Name", row);
-            Material material = MaterialFor(descriptor);
+            Material material = MaterialFor(descriptor, true);
             if (material == null) { Missing++; continue; }
             BuildSurface(row, descriptor, material);
             Surfaces++;
         }
     }
 
-    private Material MaterialFor(string descriptor)
+    private Material MaterialFor(string descriptor, bool flipDds)
     {
-        if (materials.TryGetValue(descriptor, out Material cached)) return cached;
+        string key = descriptor + (flipDds ? "|flipped" : "|raw");
+        if (materials.TryGetValue(key, out Material cached)) return cached;
         Texture2D texture = loader.LoadTexture(descriptor);
         if (texture == null) return null;
-        Material material = TransparentMaterial(texture, Color.white);
-        materials[descriptor] = material;
+        Material material = TransparentMaterial(texture, Color.white, flipDds);
+        materials[key] = material;
         return material;
     }
 
-    public static Material TransparentMaterial(Texture2D texture, Color color)
+    public static Material TransparentMaterial(Texture2D texture, Color color,
+                                               bool flipDds = true)
     {
         Shader overlayShader = Resources.Load<Shader>("PBOverlay");
         Material baseMaterial = Resources.Load<Material>("PBModel");
@@ -87,7 +91,7 @@ public sealed class PbMapOverlays
             material.EnableKeyword("_ALPHABLEND_ON");
             material.renderQueue = 3000;
         }
-        if (texture.name.EndsWith(".dds", StringComparison.OrdinalIgnoreCase))
+        if (flipDds && texture.name.EndsWith(".dds", StringComparison.OrdinalIgnoreCase))
         {
             material.mainTextureScale = new Vector2(1f, -1f);
             material.mainTextureOffset = new Vector2(0f, 1f);
