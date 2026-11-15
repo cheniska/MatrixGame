@@ -109,6 +109,11 @@ WASD или стрелки двигают камеру, щелчок по мод
   `E:/disasm2500_dev/MatrixGame_analysis/pb_preview_v13_decal_fixed.png`.
   Повторно проверены загрузка, сохранение без изменений и все декали на
   `Training.map` и `Duel.map`; оба результата побайтно совпали с исходниками.
+- Поворот декалей дополнительно исправлен на четверть оборота в UV обоих
+  типов. Контрольный кадр:
+  `E:/disasm2500_dev/MatrixGame_analysis/pb_preview_v13_decal_rotation.png`.
+  Проверки обоих типов декалей и побайтового сохранения пройдены на
+  `Training.map` и `Duel.map`.
 
 После проверки локальная сцена находится в
 `Assets/Generated/TrainingPreview.unity`; её можно открыть из окна Project.

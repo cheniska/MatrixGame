@@ -193,6 +193,10 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 float expectedX = width * CellSize - Mathf.Lerp(x0, x3, 1f / segments);
                 if (Mathf.Abs(surfaceMesh.vertices[1].x - expectedX) > 0.01f)
                     throw new InvalidOperationException("Surface corner orientation is invalid.");
+                float texK = storage.Float("surfaces", "TexK", 0);
+                if (Vector2.Distance(surfaceMesh.uv[0], new Vector2(texK, 0f)) > 0.001f ||
+                    Vector2.Distance(surfaceMesh.uv[1], new Vector2(texK, texK / segments)) > 0.001f)
+                    throw new InvalidOperationException("Surface texture quarter-turn is invalid.");
             }
             if (smokeMode == "entities")
             {
