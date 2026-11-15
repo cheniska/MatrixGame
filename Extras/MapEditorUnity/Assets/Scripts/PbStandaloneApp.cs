@@ -114,8 +114,12 @@ public sealed class PbStandaloneApp : MonoBehaviour
             }
             if (smokeMode == "preview_tile" || smokeMode == "preview_surface")
             {
+                int previewRow = 0;
+                if (smokeMode == "preview_surface")
+                    int.TryParse(Environment.GetEnvironmentVariable("PB_EDITOR_PREVIEW_ROW"),
+                                 out previewRow);
                 PbMapTile tile = smokeMode == "preview_tile" ? tileRows[0] :
-                    overlayRoot.transform.Find("Surface 0").GetComponent<PbMapTile>();
+                    overlayRoot.transform.Find("Surface " + previewRow).GetComponent<PbMapTile>();
                 SelectTile(tile, false);
                 Bounds bounds = tile.GetComponent<MeshFilter>().sharedMesh.bounds;
                 Vector3 center = bounds.center;
@@ -238,7 +242,10 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 Mesh surfaceMesh = surface == null ? null : surface.GetComponent<MeshFilter>().sharedMesh;
                 PbMapTile surfaceIdentity = surface == null ? null : surface.GetComponent<PbMapTile>();
                 MeshCollider surfaceCollider = surface == null ? null : surface.GetComponent<MeshCollider>();
+                Material surfaceMaterial = surface == null ? null :
+                    surface.GetComponent<MeshRenderer>().sharedMaterial;
                 if (surfaceMesh == null || surfaceIdentity == null || surfaceCollider == null ||
+                    surfaceMaterial == null || surfaceMaterial.mainTextureScale.y != 1f ||
                     surfaceIdentity.Table != "surfaces" || surfaceIdentity.Row != 0)
                     throw new InvalidOperationException("Surface selection target is absent.");
                 int[] surfaceTriangles = surfaceMesh.triangles;

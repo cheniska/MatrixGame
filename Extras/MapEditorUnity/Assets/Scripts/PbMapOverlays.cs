@@ -51,7 +51,7 @@ public sealed class PbMapOverlays
         for (int row = 0; row < count; row++)
         {
             string descriptor = storage.String("surfaces", "Name", row);
-            Material material = MaterialFor(descriptor, true);
+            Material material = MaterialFor(descriptor, false);
             if (material == null) { Missing++; continue; }
             BuildSurface(row, descriptor, material);
             Surfaces++;
@@ -184,7 +184,7 @@ public sealed class PbMapOverlays
         if (tint != 0xffffffffu)
             material = TransparentMaterial(loader.LoadTexture(descriptor),
                 new Color32((byte)(tint >> 16), (byte)(tint >> 8),
-                            (byte)tint, (byte)(tint >> 24)));
+                            (byte)tint, (byte)(tint >> 24)), false);
         GameObject surface = AddMesh("Surface " + row, vertices, uv, triangles, material);
         var identity = surface.AddComponent<PbMapTile>();
         identity.Table = "surfaces";
