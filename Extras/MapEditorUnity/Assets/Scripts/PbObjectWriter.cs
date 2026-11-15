@@ -38,8 +38,12 @@ public static class PbObjectWriter
                 if (retyped) result.SetInt("objects", "Index", item.Row, item.TypeIndex);
                 if (moved) SetPosition(result, item, cellSize, mapWidth);
                 if (rotated)
-                    result.SetFloat("objects", "Angle", item.Row,
-                                    -Mathf.DeltaAngle(0f, item.transform.eulerAngles.y) * Mathf.Deg2Rad);
+                {
+                    Rotation(item, out float z, out float x, out float y);
+                    result.SetFloat("objects", "Angle", item.Row, z);
+                    result.SetFloat("objects", "AngleX", item.Row, x);
+                    result.SetFloat("objects", "AngleY", item.Row, y);
+                }
                 changed++;
             }
             return result;
@@ -98,16 +102,18 @@ public static class PbObjectWriter
     private static float GetFloat(PbStorage source, PbPlacedObject item,
                                   string field, float cellSize, int mapWidth)
     {
-        if (item.Row >= 0 && field != "Angle" && field != "XF" &&
-            field != "YF" && field != "Height")
+        if (item.Row >= 0 && field == "Scale")
             return source.Float("objects", field, item.Row);
-        if (item.Row >= 0 && !Moved(item) && field != "Angle")
+        if (item.Row >= 0 && !Moved(item) && field != "Angle" &&
+            field != "AngleX" && field != "AngleY")
             return source.Float("objects", field, item.Row);
-        if (field == "Angle")
-            return item.Row >= 0 && !Rotated(item)
-                ? source.Float("objects", "Angle", item.Row)
-                : -Mathf.DeltaAngle(0f, item.transform.eulerAngles.y) * Mathf.Deg2Rad;
-        if (field == "AngleX" || field == "AngleY") return 0f;
+        if (field == "Angle" || field == "AngleX" || field == "AngleY")
+        {
+            if (item.Row >= 0 && !Rotated(item))
+                return source.Float("objects", field, item.Row);
+            Rotation(item, out float z, out float x, out float y);
+            return field == "Angle" ? z : field == "AngleX" ? x : y;
+        }
         if (field == "Scale") return 1f;
         Split(item, cellSize, mapWidth, out _, out _, out float xf, out float yf);
         if (field == "XF") return xf;
@@ -123,6 +129,20 @@ public static class PbObjectWriter
         storage.SetFloat("objects", "XF", item.Row, xf);
         storage.SetFloat("objects", "YF", item.Row, yf);
         storage.SetFloat("objects", "Height", item.Row, item.transform.position.y - 8f);
+    }
+
+    private static void Rotation(PbPlacedObject item, out float z, out float x, out float y)
+    {
+        // The game's row-vector Rx * Ry * Rz becomes Unity Ry * Rz * Rx.
+        Matrix4x4 m = Matrix4x4.Rotate(item.transform.rotation);
+        float middle = Mathf.Asin(Mathf.Clamp(m.m10, -1f, 1f));
+        float yaw = Mathf.Atan2(-m.m20, m.m00);
+        float roll = Mathf.Atan2(-m.m12, m.m11);
+        z = -yaw;
+        x = -roll;
+        y = middle;
+        if (!Finite(z) || !Finite(x) || !Finite(y))
+            throw new InvalidDataException("Nonfinite object rotation.");
     }
 
     private static void Write(byte[] bytes, int row, int value) =>

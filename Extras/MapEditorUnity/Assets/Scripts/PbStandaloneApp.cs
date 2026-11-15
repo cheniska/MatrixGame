@@ -9,6 +9,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
 {
     private const float CellSize = 20f;
     private const float MoveStep = 20f;
+    private const float WaterLevel = -2f;
     private string mapPath = "";
     private string outputPath = "";
     private string modelRoot = "";
@@ -80,6 +81,8 @@ public sealed class PbStandaloneApp : MonoBehaviour
         sun.type = LightType.Directional;
         sun.intensity = 1.2f;
         lightObject.transform.rotation = Quaternion.Euler(55, -30, 0);
+        RenderSettings.ambientMode = AmbientMode.Flat;
+        RenderSettings.ambientLight = new Color(0.62f, 0.65f, 0.69f);
         markerMaterial = Resources.Load<Material>("PBMarker") ??
                          MakeMaterial(new Color(0.85f, 0.30f, 0.16f));
         selectedMaterial = Resources.Load<Material>("PBSelected") ??
@@ -149,7 +152,8 @@ public sealed class PbStandaloneApp : MonoBehaviour
         if (smokeMode == "1" || smokeMode == "add" || smokeMode == "delete" ||
             smokeMode == "terrain" || smokeMode == "models" || smokeMode == "camera" ||
             smokeMode == "entities" || smokeMode == "textures" ||
-            smokeMode == "mirror" || smokeMode == "players" || smokeMode == "overlays")
+            smokeMode == "mirror" || smokeMode == "players" || smokeMode == "overlays" ||
+            smokeMode == "geometry")
         {
             if (storage == null)
             {
@@ -295,6 +299,26 @@ public sealed class PbStandaloneApp : MonoBehaviour
                     throw new InvalidOperationException("Composite entity preview is incomplete.");
                 objects[0].transform.position += Vector3.right * CellSize;
             }
+            if (smokeMode == "geometry")
+            {
+                PbPlacedObject item = objects.Find(o => o.GetComponentInChildren<BoxCollider>() != null);
+                if (item == null) throw new InvalidOperationException("No object pick collider.");
+                item.Rotate(15f, 10f, -10f);
+                BoxCollider pick = item.GetComponentInChildren<BoxCollider>();
+                Ray ray = new Ray(pick.bounds.center + Vector3.up *
+                    (pick.bounds.extents.y + 10f), Vector3.down);
+                if (!pick.Raycast(ray, out _, pick.bounds.size.y + 20f))
+                    throw new InvalidOperationException("Rotated object cannot be picked.");
+                PbVoLoader.Asset plant = voLoader.Load("Matrix/Obj/plant/Grass01M.vo");
+                if (plant == null || Array.Find(plant.Materials,
+                    material => material.renderQueue == 2450) == null)
+                    throw new InvalidOperationException("Vegetation alpha cutout is absent.");
+                if (mapRoot.transform.Find("Sea surface") == null)
+                    throw new InvalidOperationException("Sea surface is absent.");
+                Vector3[] normals = terrainVisualMesh.normals;
+                if (Vector3.Distance(normals[2], normals[4]) > 0.001f)
+                    throw new InvalidOperationException("Terrain cell normals are discontinuous.");
+            }
             if (smokeMode == "camera")
             {
                 ToggleCamera();
@@ -323,6 +347,16 @@ public sealed class PbStandaloneApp : MonoBehaviour
             if (smokeMode == "mirror" &&
                 check.Int("objects", "X", 0) != storage.Int("objects", "X", 0) - 1)
                 throw new InvalidOperationException("Mirrored object position was saved incorrectly.");
+            if (smokeMode == "geometry")
+            {
+                PbPlacedObject item = objects.Find(o => o.GetComponentInChildren<BoxCollider>() != null);
+                Quaternion saved = PbPlacedObject.Rotation(
+                    check.Float("objects", "Angle", item.Row),
+                    check.Float("objects", "AngleX", item.Row),
+                    check.Float("objects", "AngleY", item.Row));
+                if (Quaternion.Angle(saved, item.transform.rotation) > 0.1f)
+                    throw new InvalidOperationException("Three-axis rotation did not round-trip.");
+            }
             if (smokeMode == "players")
             {
                 Dictionary<string, string> props = check.Properties();
@@ -402,7 +436,9 @@ public sealed class PbStandaloneApp : MonoBehaviour
                     MapX(parsed.Int("objects", "X", row) + parsed.Float("objects", "XF", row)),
                     parsed.Float("objects", "Height", row) + 8f,
                     (parsed.Int("objects", "Y", row) + parsed.Float("objects", "YF", row)) * CellSize);
-                CreateMarker(row, type, position, parsed.Float("objects", "Angle", row));
+                CreateMarker(row, type, position, parsed.Float("objects", "Angle", row),
+                    parsed.Float("objects", "AngleX", row),
+                    parsed.Float("objects", "AngleY", row));
             }
             BuildEntityPreviews();
             viewCamera.transform.position = new Vector3(width * CellSize / 2f, 5000f,
@@ -429,16 +465,20 @@ public sealed class PbStandaloneApp : MonoBehaviour
         }
     }
 
-    private PbPlacedObject CreateMarker(int row, int type, Vector3 position, float angle)
+    private PbPlacedObject CreateMarker(int row, int type, Vector3 position,
+                                        float angle, float angleX = 0f, float angleY = 0f)
     {
         GameObject marker = new GameObject();
         marker.name = "Object " + row + " (type " + type + ")";
         marker.transform.SetParent(mapRoot.transform);
         marker.transform.position = position;
-        marker.transform.rotation = Quaternion.Euler(0, -angle * Mathf.Rad2Deg, 0);
+        marker.transform.rotation = PbPlacedObject.Rotation(angle, angleX, angleY);
         var item = marker.AddComponent<PbPlacedObject>();
         item.Row = row;
         item.TypeIndex = type;
+        item.AngleZ = angle;
+        item.AngleX = angleX;
+        item.AngleY = angleY;
         item.ImportedPosition = position;
         item.ImportedRotation = marker.transform.rotation;
         objects.Add(item);
@@ -474,11 +514,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 visual.transform.localScale = Vector3.one * scale;
             visual.AddComponent<MeshFilter>().sharedMesh = asset.Mesh;
             visual.AddComponent<MeshRenderer>().sharedMaterials = asset.Materials;
-            var collider = visual.AddComponent<BoxCollider>();
-            collider.center = asset.Mesh.bounds.center;
-            Vector3 size = asset.Mesh.bounds.size;
-            collider.size = new Vector3(Mathf.Max(size.x, 1f),
-                                        Mathf.Max(size.y, 1f), Mathf.Max(size.z, 1f));
+            AddPickColliders(visual, asset);
         }
         visual.name = "Visual";
     }
@@ -690,12 +726,20 @@ public sealed class PbStandaloneApp : MonoBehaviour
         visual.transform.localPosition = position;
         visual.AddComponent<MeshFilter>().sharedMesh = asset.Mesh;
         visual.AddComponent<MeshRenderer>().sharedMaterials = asset.Materials;
-        var collider = visual.AddComponent<BoxCollider>();
-        collider.center = asset.Mesh.bounds.center;
-        Vector3 size = asset.Mesh.bounds.size;
-        collider.size = new Vector3(Mathf.Max(size.x, 1f),
-                                    Mathf.Max(size.y, 1f), Mathf.Max(size.z, 1f));
+        AddPickColliders(visual, asset);
         return visual;
+    }
+
+    private static void AddPickColliders(GameObject visual, PbVoLoader.Asset asset)
+    {
+        foreach (Bounds bounds in asset.PickBounds)
+        {
+            var collider = visual.AddComponent<BoxCollider>();
+            collider.center = bounds.center;
+            Vector3 size = bounds.size;
+            collider.size = new Vector3(Mathf.Max(size.x, 2f),
+                                        Mathf.Max(size.y, 2f), Mathf.Max(size.z, 2f));
+        }
     }
 
     private float SampleTerrainHeight(float cellX, float cellY)
@@ -862,6 +906,32 @@ public sealed class PbStandaloneApp : MonoBehaviour
         terrainCollider = terrain.AddComponent<MeshCollider>();
         terrainCollider.sharedMesh = terrainMesh;
         BuildTexturedTerrain(vertices, terrain.transform);
+        BuildWater(vertices);
+    }
+
+    private void BuildWater(Vector3[] ground)
+    {
+        bool submerged = false;
+        foreach (Vector3 point in ground)
+            if (point.y < WaterLevel) { submerged = true; break; }
+        if (!submerged) return;
+        var water = new GameObject("Sea surface");
+        water.transform.SetParent(mapRoot.transform, false);
+        var mesh = new Mesh { name = "Sea at game water level" };
+        mesh.vertices = new[] {
+            new Vector3(0, WaterLevel, 0),
+            new Vector3(width * CellSize, WaterLevel, 0),
+            new Vector3(0, WaterLevel, height * CellSize),
+            new Vector3(width * CellSize, WaterLevel, height * CellSize) };
+        mesh.uv = new[] { Vector2.zero, Vector2.right, Vector2.up, Vector2.one };
+        mesh.triangles = new[] { 0, 2, 1, 1, 2, 3 };
+        mesh.RecalculateNormals();
+        water.AddComponent<MeshFilter>().sharedMesh = mesh;
+        Shader shader = Resources.Load<Shader>("PBOverlay");
+        Material material = shader == null ? MakeMaterial(new Color(0.16f, 0.33f, 0.48f, 0.78f))
+            : new Material(shader);
+        material.color = new Color(0.18f, 0.37f, 0.52f, 0.78f);
+        water.AddComponent<MeshRenderer>().sharedMaterial = material;
     }
 
     private void BuildTexturedTerrain(Vector3[] grid, Transform parent)
@@ -890,6 +960,8 @@ public sealed class PbStandaloneApp : MonoBehaviour
         }
         var vertices = new Vector3[width * height * 4];
         var uv = new Vector2[vertices.Length];
+        var normals = new Vector3[vertices.Length];
+        Vector3[] smoothNormals = terrainMesh.normals;
         var triangles = new List<int>[materials.Length];
         for (int i = 0; i < triangles.Length; i++) triangles[i] = new List<int>();
         for (int y = 0; y < height; y++)
@@ -902,6 +974,10 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 vertices[at + 1] = grid[gridIndex + width + 1];
                 vertices[at + 2] = grid[gridIndex + 1];
                 vertices[at + 3] = grid[gridIndex + width + 2];
+                normals[at] = smoothNormals[gridIndex];
+                normals[at + 1] = smoothNormals[gridIndex + width + 1];
+                normals[at + 2] = smoothNormals[gridIndex + 1];
+                normals[at + 3] = smoothNormals[gridIndex + width + 2];
                 uv[at] = new Vector2(0, 0);
                 uv[at + 1] = new Vector2(0, 1);
                 uv[at + 2] = new Vector2(1, 0);
@@ -920,11 +996,11 @@ public sealed class PbStandaloneApp : MonoBehaviour
         terrainVisualMesh = new Mesh { name = "PB textured terrain" };
         terrainVisualMesh.indexFormat = IndexFormat.UInt32;
         terrainVisualMesh.vertices = vertices;
+        terrainVisualMesh.normals = normals;
         terrainVisualMesh.uv = uv;
         terrainVisualMesh.subMeshCount = triangles.Length;
         for (int i = 0; i < triangles.Length; i++)
             terrainVisualMesh.SetTriangles(triangles[i], i);
-        terrainVisualMesh.RecalculateNormals();
         var visual = new GameObject("Textured terrain");
         visual.transform.SetParent(parent, false);
         visual.AddComponent<MeshFilter>().sharedMesh = terrainVisualMesh;
@@ -1035,8 +1111,12 @@ public sealed class PbStandaloneApp : MonoBehaviour
             if (Input.GetKeyDown(KeyCode.PageUp)) move.y += 1f;
             if (Input.GetKeyDown(KeyCode.PageDown)) move.y -= 1f;
             selected.transform.position += move;
-            if (Input.GetKeyDown(KeyCode.Comma)) selected.transform.Rotate(0, -15f, 0);
-            if (Input.GetKeyDown(KeyCode.Period)) selected.transform.Rotate(0, 15f, 0);
+            if (Input.GetKeyDown(KeyCode.Comma)) selected.Rotate(15f, 0f, 0f);
+            if (Input.GetKeyDown(KeyCode.Period)) selected.Rotate(-15f, 0f, 0f);
+            if (Input.GetKeyDown(KeyCode.U)) selected.Rotate(0f, 15f, 0f);
+            if (Input.GetKeyDown(KeyCode.O)) selected.Rotate(0f, -15f, 0f);
+            if (Input.GetKeyDown(KeyCode.N)) selected.Rotate(0f, 0f, -15f);
+            if (Input.GetKeyDown(KeyCode.M)) selected.Rotate(0f, 0f, 15f);
         }
         else
         {
@@ -1135,7 +1215,19 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 shown[at + 3].y = vertices[grid + width + 2].y;
             }
         terrainVisualMesh.vertices = shown;
-        terrainVisualMesh.RecalculateNormals();
+        Vector3[] smoothNormals = terrainMesh.normals;
+        Vector3[] shownNormals = terrainVisualMesh.normals;
+        for (int cellY = Mathf.Max(0, y - 1); cellY <= Mathf.Min(height - 1, y); cellY++)
+            for (int cellX = Mathf.Max(0, x - 1); cellX <= Mathf.Min(width - 1, x); cellX++)
+            {
+                int grid = cellY * (width + 1) + cellX;
+                int at = (cellY * width + cellX) * 4;
+                shownNormals[at] = smoothNormals[grid];
+                shownNormals[at + 1] = smoothNormals[grid + width + 1];
+                shownNormals[at + 2] = smoothNormals[grid + 1];
+                shownNormals[at + 3] = smoothNormals[grid + width + 2];
+            }
+        terrainVisualMesh.normals = shownNormals;
         terrainCollider.sharedMesh = null;
         terrainCollider.sharedMesh = terrainMesh;
         BuildOverlays();
@@ -1369,9 +1461,11 @@ public sealed class PbStandaloneApp : MonoBehaviour
         modelRoot = GUI.TextField(new Rect(100, 79, Screen.width - 190, 23), modelRoot);
         if (GUI.Button(new Rect(Screen.width - 85, 79, 75, 23), "Reload")) ReloadModels();
         GUI.Label(new Rect(10, 106, Screen.width - 20, 22), message);
-        GUI.Label(new Rect(10, 128, Screen.width - 20, 20), perspective
-            ? "3D: right drag orbit | WASD pan | Q/E height | wheel zoom | C top | Decals tab: click to select"
-            : "Top: WASD/arrows pan | wheel zoom | C 3D | Decals tab: click decal, Shift+click adds more");
+        GUI.Label(new Rect(10, 128, Screen.width - 20, 20), selected != null
+            ? "Brush: IJKL move X/Z | PgUp/PgDn move Y | ,/. yaw | U/O tilt X | N/M tilt Y"
+            : perspective
+                ? "3D: right drag orbit | WASD pan | Q/E height | wheel zoom | C top | Decals tab: click to select"
+                : "Top: WASD/arrows pan | wheel zoom | C 3D | Decals tab: click decal, Shift+click adds more");
         DrawSidebar();
     }
 

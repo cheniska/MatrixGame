@@ -12,6 +12,7 @@ public sealed class PbVoLoader
     {
         public Mesh Mesh;
         public Material[] Materials;
+        public Bounds[] PickBounds;
         public Dictionary<int, Matrix4x4> Attachments;
         public Dictionary<int, string> AttachmentNames;
 
@@ -183,6 +184,16 @@ public sealed class PbVoLoader
         mesh.subMeshCount = surfaceCount;
         for (int i = 0; i < surfaceCount; i++) mesh.SetTriangles(groups[i], i);
         mesh.RecalculateBounds();
+        var pickBounds = new List<Bounds>();
+        for (int surface = 0; surface < surfaceCount; surface++)
+        {
+            List<int> indices = groups[surface];
+            if (indices.Count == 0) continue;
+            Bounds bounds = new Bounds(vertices[indices[0]], Vector3.zero);
+            foreach (int index in indices) bounds.Encapsulate(vertices[index]);
+            pickBounds.Add(bounds);
+        }
+        if (pickBounds.Count == 0) pickBounds.Add(mesh.bounds);
 
         var materials = new Material[surfaceCount];
         string mapTexture = Parameter(descriptor, "Tex");
@@ -253,7 +264,7 @@ public sealed class PbVoLoader
                 attachmentNames[id] = vo.String("matrices", "name", i);
             }
         }
-        return new Asset { Mesh = mesh, Materials = materials,
+        return new Asset { Mesh = mesh, Materials = materials, PickBounds = pickBounds.ToArray(),
                            Attachments = attachments, AttachmentNames = attachmentNames };
     }
 
@@ -300,12 +311,15 @@ public sealed class PbVoLoader
         return null;
     }
 
-    private static Texture2D ReadPng(string path)
+    private Texture2D ReadPng(string path)
     {
         var texture = new Texture2D(2, 2);
         if (!texture.LoadImage(File.ReadAllBytes(path)))
             throw new InvalidDataException("PNG decoder rejected texture.");
         texture.name = Path.GetFileName(path);
+        Color32[] pixels = texture.GetPixels32();
+        foreach (Color32 pixel in pixels)
+            if (pixel.a < 250) { cutoutTextures.Add(texture); break; }
         return texture;
     }
 
@@ -354,12 +368,33 @@ public sealed class PbVoLoader
         }
         var texture = new Texture2D(width, height, format, false);
         texture.LoadRawTextureData(payload);
-        if (fourcc == "DXT1")
+        if (fourcc == "DXT1" || fourcc == "DXT3" || luminanceAlpha)
             for (int i = 3; i < payload.Length; i += 4)
-                if (payload[i] < 255) { cutoutTextures.Add(texture); break; }
+                if (payload[i] < 250) { cutoutTextures.Add(texture); break; }
+        if (fourcc == "DXT5" && HasDxt5Transparency(payload))
+            cutoutTextures.Add(texture);
         texture.Apply(false, true);
         texture.name = Path.GetFileName(path);
         return texture;
+    }
+
+    private static bool HasDxt5Transparency(byte[] blocks)
+    {
+        for (int at = 0; at < blocks.Length; at += 16)
+        {
+            byte a0 = blocks[at], a1 = blocks[at + 1];
+            for (int pixel = 0; pixel < 16; pixel++)
+            {
+                int bit = pixel * 3;
+                int index = (int)((BitConverter.ToUInt64(blocks, at) >> bit) & 7);
+                int alpha = index == 0 ? a0 : index == 1 ? a1 :
+                    a0 > a1 ? ((8 - index) * a0 + (index - 1) * a1) / 7 :
+                    index == 6 ? 0 : index == 7 ? 255 :
+                    ((6 - index) * a0 + (index - 1) * a1) / 5;
+                if (alpha < 250) return true;
+            }
+        }
+        return false;
     }
 
     private static byte[] DecodeDxt3(byte[] source, int width, int height)
