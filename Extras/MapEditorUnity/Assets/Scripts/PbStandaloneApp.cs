@@ -18,6 +18,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
     private GameObject mapRoot;
     private Camera viewCamera;
     private readonly List<PbPlacedObject> objects = new List<PbPlacedObject>();
+    private readonly List<GameObject> entityRoots = new List<GameObject>();
     private readonly List<string> typeNames = new List<string>();
     private readonly List<string> typeData = new List<string>();
     private PbVoLoader voLoader;
@@ -30,7 +31,11 @@ public sealed class PbStandaloneApp : MonoBehaviour
     private Material markerMaterial;
     private Material selectedMaterial;
     private Mesh terrainMesh;
+    private Mesh terrainVisualMesh;
     private MeshCollider terrainCollider;
+    private int terrainTextureCount;
+    private int entityCount;
+    private PbMapEntity selectedEntity;
     private readonly HashSet<int> editedTerrain = new HashSet<int>();
     private bool terrainBrush;
     private bool perspective;
@@ -84,15 +89,25 @@ public sealed class PbStandaloneApp : MonoBehaviour
         if (smokeMode == "preview")
         {
             if (storage == null || voLoader.LoadedModels < 1)
-                throw new InvalidOperationException("Preview test could not load models.");
+            {
+                Debug.LogError("Preview test could not load models: " + message);
+                Application.Quit(1);
+                return;
+            }
             ToggleCamera();
             CapturePreview(Environment.GetEnvironmentVariable("PB_EDITOR_PREVIEW_OUTPUT"));
             Application.Quit();
         }
         if (smokeMode == "1" || smokeMode == "add" || smokeMode == "delete" ||
-            smokeMode == "terrain" || smokeMode == "models" || smokeMode == "camera")
+            smokeMode == "terrain" || smokeMode == "models" || smokeMode == "camera" ||
+            smokeMode == "entities" || smokeMode == "textures")
         {
-            if (storage == null) throw new InvalidOperationException("Smoke test could not load the map.");
+            if (storage == null)
+            {
+                Debug.LogError("Smoke test could not load the map: " + message);
+                Application.Quit(1);
+                return;
+            }
             string smokeOutput = Environment.GetEnvironmentVariable("PB_EDITOR_SMOKE_OUTPUT");
             if (string.IsNullOrEmpty(smokeOutput))
                 throw new InvalidOperationException("Set PB_EDITOR_SMOKE_OUTPUT.");
@@ -103,6 +118,19 @@ public sealed class PbStandaloneApp : MonoBehaviour
             if (smokeMode == "models" && (voLoader.LoadedModels < 1 ||
                 voLoader.MissingModels != 0 || voLoader.FailedModels != 0))
                 throw new InvalidOperationException("Smoke test could not load all VO types.");
+            if (smokeMode == "textures" &&
+                terrainTextureCount != storage.Count("textures", "Name", 5))
+                throw new InvalidOperationException("Smoke test terrain palette is incomplete.");
+            if (smokeMode == "entities")
+            {
+                foreach (string table in new[] { "buildings", "cannons", "robots" })
+                {
+                    GameObject entity = entityRoots.Find(root =>
+                        root.GetComponent<PbMapEntity>().Table == table);
+                    if (entity == null) throw new InvalidOperationException("Missing entity " + table);
+                    entity.transform.position += Vector3.right * CellSize;
+                }
+            }
             if (smokeMode == "camera")
             {
                 ToggleCamera();
@@ -124,6 +152,10 @@ public sealed class PbStandaloneApp : MonoBehaviour
             if (smokeMode == "terrain" &&
                 Mathf.Abs(check.Float("points", "Z", terrainIndex) - originalHeight - 1f) > 0.001f)
                 throw new InvalidOperationException("Smoke test terrain height mismatch.");
+            if (smokeMode == "entities")
+                foreach (string table in new[] { "buildings", "cannons", "robots" })
+                    if (check.Int(table, "X", 0) != storage.Int(table, "X", 0) + 1)
+                        throw new InvalidOperationException("Smoke test entity position mismatch: " + table);
             Debug.Log("PB standalone smoke succeeded: " + outputPath);
             Application.Quit();
         }
@@ -158,11 +190,13 @@ public sealed class PbStandaloneApp : MonoBehaviour
 
             if (mapRoot != null) Destroy(mapRoot);
             objects.Clear();
+            entityRoots.Clear();
             typeNames.Clear();
             typeData.Clear();
             editedTerrain.Clear();
             terrainBrush = false;
             selected = null;
+            selectedEntity = null;
             selectedRenderer = null;
             selectedOriginalMaterials = null;
             storage = parsed;
@@ -193,6 +227,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
                     (parsed.Int("objects", "Y", row) + parsed.Float("objects", "YF", row)) * CellSize);
                 CreateMarker(row, type, position, parsed.Float("objects", "Angle", row));
             }
+            BuildEntityPreviews();
             viewCamera.transform.position = new Vector3(width * CellSize / 2f, 5000f,
                                                         height * CellSize / 2f);
             viewCamera.transform.rotation = Quaternion.Euler(90, 0, 0);
@@ -204,7 +239,8 @@ public sealed class PbStandaloneApp : MonoBehaviour
             message = "Loaded " + width + " x " + height + ", objects: " + count +
                       ", VO: " + voLoader.LoadedModels + " loaded / " +
                       voLoader.MissingModels + " missing / " + voLoader.FailedModels +
-                      " failed; textures: " + voLoader.LoadedTextures;
+                      " failed; textures: " + voLoader.LoadedTextures +
+                      ", terrain: " + terrainTextureCount + ", entities: " + entityCount;
             Debug.Log("PB standalone " + message);
         }
         catch (Exception error)
@@ -273,10 +309,154 @@ public sealed class PbStandaloneApp : MonoBehaviour
         if (storage == null) return;
         Select(null);
         voLoader = new PbVoLoader(modelRoot);
+        Transform terrain = terrainCollider.transform;
+        Transform oldTerrain = terrain.Find("Textured terrain");
+        if (oldTerrain != null)
+        {
+            oldTerrain.gameObject.SetActive(false);
+            Destroy(oldTerrain.gameObject);
+        }
+        BuildTexturedTerrain(terrainMesh.vertices, terrain);
         foreach (PbPlacedObject item in objects) AttachVisual(item);
+        foreach (GameObject root in entityRoots)
+        {
+            foreach (Transform child in root.transform)
+            {
+                child.gameObject.SetActive(false);
+                Destroy(child.gameObject);
+            }
+            PbMapEntity entity = root.GetComponent<PbMapEntity>();
+            if (entity.Table == "buildings")
+                AttachEntityModel(root, "Matrix/Building/b" + entity.Kind + ".vo", 0f);
+            else if (entity.Table == "cannons")
+            {
+                AttachEntityModel(root, "Matrix/Cannon/Basis.vo", 0f);
+                AttachEntityModel(root, "Matrix/Cannon/Turret" + entity.Kind + ".vo", 0f);
+            }
+            else if (entity.Table == "robots")
+                AttachEntityModel(root, "Matrix/Robot/Chassis" + entity.Kind + ".vo", 0f);
+        }
         message = "VO: " + voLoader.LoadedModels + " loaded / " +
                   voLoader.MissingModels + " missing / " + voLoader.FailedModels +
-                  " failed; textures: " + voLoader.LoadedTextures;
+                  " failed; textures: " + voLoader.LoadedTextures +
+                  ", terrain: " + terrainTextureCount;
+    }
+
+    private void BuildEntityPreviews()
+    {
+        foreach (GameObject old in entityRoots)
+            if (old != null) { old.SetActive(false); Destroy(old); }
+        entityRoots.Clear();
+        selectedEntity = null;
+        entityCount = 0;
+        int buildings = storage.Count("buildings", "X", 0);
+        for (int row = 0; row < buildings; row++)
+        {
+            int kind = storage.Int("buildings", "Kind", row);
+            int side = storage.Int("buildings", "Side", row);
+            float x = storage.Int("buildings", "X", row);
+            float y = storage.Int("buildings", "Y", row);
+            float angle = storage.Int("buildings", "Angle", row) * 90f;
+            GameObject root = CreateEntity("buildings", row, kind, side, x, y, angle, 0f);
+            AttachEntityModel(root, "Matrix/Building/b" + kind + ".vo", 0f);
+        }
+        int cannons = storage.Count("cannons", "X", 0);
+        for (int row = 0; row < cannons; row++)
+        {
+            int kind = storage.Int("cannons", "Kind", row);
+            int side = storage.Int("cannons", "Side", row);
+            float x = storage.Int("cannons", "X", row) + storage.Float("cannons", "XF", row);
+            float y = storage.Int("cannons", "Y", row) + storage.Float("cannons", "YF", row);
+            float angle = storage.Float("cannons", "Angle", row) * Mathf.Rad2Deg;
+            float addHeight = storage.Float("cannons", "AddH", row);
+            GameObject root = CreateEntity("cannons", row, kind, side, x, y, angle, addHeight);
+            AttachEntityModel(root, "Matrix/Cannon/Basis.vo", 0f);
+            AttachEntityModel(root, "Matrix/Cannon/Turret" + kind + ".vo", 0f);
+        }
+        int robots = storage.Count("robots", "X", 0);
+        for (int row = 0; row < robots; row++)
+        {
+            int side = storage.Int("robots", "Side", row);
+            float x = storage.Int("robots", "X", row) + storage.Float("robots", "XF", row);
+            float y = storage.Int("robots", "Y", row) + storage.Float("robots", "YF", row);
+            string units = storage.String("robots", "Units", row);
+            int chassis = ChassisKind(units);
+            GameObject root = CreateEntity("robots", row, chassis, side, x, y, 0f, 0f);
+            AttachEntityModel(root, "Matrix/Robot/Chassis" + chassis + ".vo", 0f);
+        }
+    }
+
+    private GameObject CreateEntity(string table, int row, int kind, int side,
+                                    float cellX, float cellY, float angle, float extraHeight)
+    {
+        var root = new GameObject(table + " " + row + " kind " + kind + " side " + side);
+        root.transform.SetParent(mapRoot.transform);
+        root.transform.position = new Vector3(cellX * CellSize,
+            SampleTerrainHeight(cellX, cellY) + extraHeight, cellY * CellSize);
+        root.transform.rotation = Quaternion.Euler(0, angle, 0);
+        var info = root.AddComponent<PbMapEntity>();
+        info.Table = table;
+        info.Row = row;
+        info.Kind = kind;
+        info.Side = side;
+        info.ImportedPosition = root.transform.position;
+        info.ImportedRotation = root.transform.rotation;
+        info.ExtraHeight = extraHeight;
+        info.ImportedExtraHeight = extraHeight;
+        entityRoots.Add(root);
+        entityCount++;
+        return root;
+    }
+
+    private void AttachEntityModel(GameObject root, string descriptor, float raise)
+    {
+        PbVoLoader.Asset asset = voLoader.Load(descriptor);
+        if (asset == null)
+        {
+            GameObject cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            cube.name = "Missing " + descriptor;
+            cube.transform.SetParent(root.transform, false);
+            cube.transform.localPosition = Vector3.up * (10f + raise);
+            cube.transform.localScale = Vector3.one * 20f;
+            cube.GetComponent<Renderer>().sharedMaterial = markerMaterial;
+            return;
+        }
+        var visual = new GameObject(Path.GetFileName(descriptor));
+        visual.transform.SetParent(root.transform, false);
+        visual.transform.localPosition = Vector3.up * raise;
+        visual.AddComponent<MeshFilter>().sharedMesh = asset.Mesh;
+        visual.AddComponent<MeshRenderer>().sharedMaterials = asset.Materials;
+        var collider = visual.AddComponent<BoxCollider>();
+        collider.center = asset.Mesh.bounds.center;
+        Vector3 size = asset.Mesh.bounds.size;
+        collider.size = new Vector3(Mathf.Max(size.x, 1f),
+                                    Mathf.Max(size.y, 1f), Mathf.Max(size.z, 1f));
+    }
+
+    private float SampleTerrainHeight(float cellX, float cellY)
+    {
+        float x = Mathf.Clamp(cellX, 0f, width);
+        float y = Mathf.Clamp(cellY, 0f, height);
+        int x0 = Mathf.Min(Mathf.FloorToInt(x), width - 1);
+        int y0 = Mathf.Min(Mathf.FloorToInt(y), height - 1);
+        float dx = x - x0;
+        float dy = y - y0;
+        Vector3[] grid = terrainMesh.vertices;
+        int at = y0 * (width + 1) + x0;
+        return Mathf.Lerp(Mathf.Lerp(grid[at].y, grid[at + 1].y, dx),
+                          Mathf.Lerp(grid[at + width + 1].y,
+                                     grid[at + width + 2].y, dx), dy);
+    }
+
+    private static int ChassisKind(string units)
+    {
+        foreach (string part in units.Split('|'))
+        {
+            string[] fields = part.Split(',');
+            if (fields.Length >= 2 && fields[0].Trim() == "1" &&
+                int.TryParse(fields[1], out int kind)) return kind;
+        }
+        return 1;
     }
 
     private void ChangeType(PbPlacedObject item, int type)
@@ -336,11 +516,76 @@ public sealed class PbStandaloneApp : MonoBehaviour
         var terrain = new GameObject("Terrain");
         terrain.transform.SetParent(mapRoot.transform);
         terrain.AddComponent<MeshFilter>().sharedMesh = terrainMesh;
-        terrain.AddComponent<MeshRenderer>().sharedMaterial =
-            Resources.Load<Material>("PBTerrain") ??
-            MakeMaterial(new Color(0.36f, 0.49f, 0.34f));
         terrainCollider = terrain.AddComponent<MeshCollider>();
         terrainCollider.sharedMesh = terrainMesh;
+        BuildTexturedTerrain(vertices, terrain.transform);
+    }
+
+    private void BuildTexturedTerrain(Vector3[] grid, Transform parent)
+    {
+        int paletteCount = storage.Count("textures", "Name", 5);
+        if (storage.Count("units", "Unit", 1) != width * height)
+            throw new InvalidDataException("Terrain cell count does not match map size.");
+        string catalogPath = Path.GetFullPath(Path.Combine(Application.dataPath,
+                                                           "../Catalog/data.txt"));
+        PbTerrainCatalog catalog = PbTerrainCatalog.Read(catalogPath);
+        var materials = new Material[paletteCount + 1];
+        Material baseMaterial = Resources.Load<Material>("PBModel");
+        materials[0] = baseMaterial == null ? MakeMaterial(new Color(0.2f, 0.35f, 0.45f))
+            : new Material(baseMaterial) { color = new Color(0.2f, 0.35f, 0.45f) };
+        terrainTextureCount = 0;
+        for (int i = 0; i < paletteCount; i++)
+        {
+            Texture2D texture = catalog.LoadTexture(storage.String("textures", "Name", i), modelRoot);
+            Material material = baseMaterial == null
+                ? MakeMaterial(Color.white) : new Material(baseMaterial);
+            material.mainTexture = texture;
+            material.color = texture == null ? new Color(0.36f, 0.49f, 0.34f) : Color.white;
+            if (material.HasProperty("_Glossiness")) material.SetFloat("_Glossiness", 0f);
+            materials[i + 1] = material;
+            if (texture != null) terrainTextureCount++;
+        }
+        var vertices = new Vector3[width * height * 4];
+        var uv = new Vector2[vertices.Length];
+        var triangles = new List<int>[materials.Length];
+        for (int i = 0; i < triangles.Length; i++) triangles[i] = new List<int>();
+        for (int y = 0; y < height; y++)
+            for (int x = 0; x < width; x++)
+            {
+                int gridIndex = y * (width + 1) + x;
+                int cell = y * width + x;
+                int at = cell * 4;
+                vertices[at] = grid[gridIndex];
+                vertices[at + 1] = grid[gridIndex + width + 1];
+                vertices[at + 2] = grid[gridIndex + 1];
+                vertices[at + 3] = grid[gridIndex + width + 2];
+                uv[at] = new Vector2(0, 0);
+                uv[at + 1] = new Vector2(0, 1);
+                uv[at + 2] = new Vector2(1, 0);
+                uv[at + 3] = new Vector2(1, 1);
+                int unit = storage.Int("units", "Unit", cell, 1);
+                int palette = ((unit >> 10) - 1) / 2;
+                int material = unit == 0 || palette < 0 || palette >= paletteCount
+                    ? 0 : palette + 1;
+                triangles[material].Add(at);
+                triangles[material].Add(at + 1);
+                triangles[material].Add(at + 2);
+                triangles[material].Add(at + 2);
+                triangles[material].Add(at + 1);
+                triangles[material].Add(at + 3);
+            }
+        terrainVisualMesh = new Mesh { name = "PB textured terrain" };
+        terrainVisualMesh.indexFormat = IndexFormat.UInt32;
+        terrainVisualMesh.vertices = vertices;
+        terrainVisualMesh.uv = uv;
+        terrainVisualMesh.subMeshCount = triangles.Length;
+        for (int i = 0; i < triangles.Length; i++)
+            terrainVisualMesh.SetTriangles(triangles[i], i);
+        terrainVisualMesh.RecalculateNormals();
+        var visual = new GameObject("Textured terrain");
+        visual.transform.SetParent(parent, false);
+        visual.AddComponent<MeshFilter>().sharedMesh = terrainVisualMesh;
+        visual.AddComponent<MeshRenderer>().sharedMaterials = materials;
     }
 
     private void Update()
@@ -400,20 +645,48 @@ public sealed class PbStandaloneApp : MonoBehaviour
             if (terrainBrush && terrainCollider.Raycast(ray, out RaycastHit terrainHit, 10000f))
                 SculptTerrain(terrainHit.point, Input.GetKey(KeyCode.LeftShift) ? -1f : 1f);
             else if (!terrainBrush && Physics.Raycast(ray, out RaycastHit hit, 10000f))
-                Select(hit.collider.GetComponentInParent<PbPlacedObject>());
+            {
+                PbPlacedObject objectHit = hit.collider.GetComponentInParent<PbPlacedObject>();
+                Select(objectHit);
+                selectedEntity = objectHit == null
+                    ? hit.collider.GetComponentInParent<PbMapEntity>() : null;
+            }
         }
         if (terrainBrush) return;
-        if (selected == null) return;
+        if (selected == null && selectedEntity == null) return;
         Vector3 move = Vector3.zero;
         if (Input.GetKeyDown(KeyCode.J)) move.x -= MoveStep;
         if (Input.GetKeyDown(KeyCode.L)) move.x += MoveStep;
         if (Input.GetKeyDown(KeyCode.I)) move.z += MoveStep;
         if (Input.GetKeyDown(KeyCode.K)) move.z -= MoveStep;
-        if (Input.GetKeyDown(KeyCode.PageUp)) move.y += 1f;
-        if (Input.GetKeyDown(KeyCode.PageDown)) move.y -= 1f;
-        selected.transform.position += move;
-        if (Input.GetKeyDown(KeyCode.Comma)) selected.transform.Rotate(0, -15f, 0);
-        if (Input.GetKeyDown(KeyCode.Period)) selected.transform.Rotate(0, 15f, 0);
+        if (selected != null)
+        {
+            if (Input.GetKeyDown(KeyCode.PageUp)) move.y += 1f;
+            if (Input.GetKeyDown(KeyCode.PageDown)) move.y -= 1f;
+            selected.transform.position += move;
+            if (Input.GetKeyDown(KeyCode.Comma)) selected.transform.Rotate(0, -15f, 0);
+            if (Input.GetKeyDown(KeyCode.Period)) selected.transform.Rotate(0, 15f, 0);
+        }
+        else
+        {
+            selectedEntity.transform.position += move;
+            if (selectedEntity.Table == "cannons")
+            {
+                if (Input.GetKeyDown(KeyCode.PageUp)) selectedEntity.ExtraHeight += 1f;
+                if (Input.GetKeyDown(KeyCode.PageDown)) selectedEntity.ExtraHeight -= 1f;
+            }
+            float x = selectedEntity.transform.position.x / CellSize;
+            float y = selectedEntity.transform.position.z / CellSize;
+            Vector3 p = selectedEntity.transform.position;
+            p.y = SampleTerrainHeight(x, y) + selectedEntity.ExtraHeight;
+            selectedEntity.transform.position = p;
+            float turn = selectedEntity.Table == "buildings" ? 90f : 15f;
+            if (selectedEntity.Table != "robots")
+            {
+                if (Input.GetKeyDown(KeyCode.Comma)) selectedEntity.transform.Rotate(0, -turn, 0);
+                if (Input.GetKeyDown(KeyCode.Period)) selectedEntity.transform.Rotate(0, turn, 0);
+            }
+        }
     }
 
     private void ToggleCamera()
@@ -479,8 +752,28 @@ public sealed class PbStandaloneApp : MonoBehaviour
         vertices[index].y += amount;
         terrainMesh.vertices = vertices;
         terrainMesh.RecalculateNormals();
+        Vector3[] shown = terrainVisualMesh.vertices;
+        for (int cellY = Mathf.Max(0, y - 1); cellY <= Mathf.Min(height - 1, y); cellY++)
+            for (int cellX = Mathf.Max(0, x - 1); cellX <= Mathf.Min(width - 1, x); cellX++)
+            {
+                int grid = cellY * (width + 1) + cellX;
+                int at = (cellY * width + cellX) * 4;
+                shown[at].y = vertices[grid].y;
+                shown[at + 1].y = vertices[grid + width + 1].y;
+                shown[at + 2].y = vertices[grid + 1].y;
+                shown[at + 3].y = vertices[grid + width + 2].y;
+            }
+        terrainVisualMesh.vertices = shown;
+        terrainVisualMesh.RecalculateNormals();
         terrainCollider.sharedMesh = null;
         terrainCollider.sharedMesh = terrainMesh;
+        foreach (GameObject entityRoot in entityRoots)
+        {
+            PbMapEntity entity = entityRoot.GetComponent<PbMapEntity>();
+            Vector3 p = entityRoot.transform.position;
+            p.y = SampleTerrainHeight(p.x / CellSize, p.z / CellSize) + entity.ExtraHeight;
+            entityRoot.transform.position = p;
+        }
         editedTerrain.Add(index);
         message = "Terrain vertex " + x + ", " + y + " height " + vertices[index].y;
     }
@@ -490,6 +783,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
         if (selectedRenderer != null && selectedOriginalMaterials != null)
             selectedRenderer.sharedMaterials = selectedOriginalMaterials;
         selected = item;
+        if (item != null) selectedEntity = null;
         selectedRenderer = item == null ? null : item.GetComponentInChildren<Renderer>();
         selectedOriginalMaterials = selectedRenderer == null ? null : selectedRenderer.sharedMaterials;
         if (selectedRenderer != null)
@@ -509,6 +803,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
             if (Hash(File.ReadAllBytes(mapPath)) != sourceHash)
                 throw new IOException("Source map changed. Load it again.");
             PbStorage edited = PbObjectWriter.Save(storage, objects, CellSize, out int changed);
+            int changedEntities = SaveEntityPositions(edited);
             if (editedTerrain.Count > 0)
             {
                 Vector3[] vertices = terrainMesh.vertices;
@@ -517,6 +812,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
             }
             File.WriteAllBytes(outputPath, edited.Bytes());
             message = "Saved " + outputPath + " (objects: " + changed +
+                      ", entities: " + changedEntities +
                       ", terrain vertices: " + editedTerrain.Count + ")";
         }
         catch (Exception error)
@@ -524,6 +820,60 @@ public sealed class PbStandaloneApp : MonoBehaviour
             message = "Save failed: " + error.Message;
             Debug.LogException(error);
         }
+    }
+
+    private int SaveEntityPositions(PbStorage edited)
+    {
+        int changed = 0;
+        foreach (GameObject root in entityRoots)
+        {
+            PbMapEntity item = root.GetComponent<PbMapEntity>();
+            Vector3 p = root.transform.position;
+            if (float.IsNaN(p.x) || float.IsNaN(p.z) ||
+                float.IsInfinity(p.x) || float.IsInfinity(p.z))
+                throw new InvalidDataException("Nonfinite entity position.");
+            bool moved = (new Vector2(p.x, p.z) -
+                          new Vector2(item.ImportedPosition.x,
+                                      item.ImportedPosition.z)).sqrMagnitude > 0.0001f;
+            bool turned = Quaternion.Angle(root.transform.rotation,
+                                           item.ImportedRotation) > 0.01f;
+            bool raised = Mathf.Abs(item.ExtraHeight - item.ImportedExtraHeight) > 0.0001f;
+            if (!moved && !turned && !raised) continue;
+            float x = p.x / CellSize;
+            float y = p.z / CellSize;
+            int cellX = Mathf.FloorToInt(x);
+            int cellY = Mathf.FloorToInt(y);
+            if (item.Table == "buildings")
+            {
+                if (moved)
+                {
+                    edited.SetInt("buildings", "X", item.Row, Mathf.RoundToInt(x));
+                    edited.SetInt("buildings", "Y", item.Row, Mathf.RoundToInt(y));
+                }
+                if (turned)
+                    edited.SetInt("buildings", "Angle", item.Row,
+                                  Mathf.RoundToInt(root.transform.eulerAngles.y / 90f) % 4);
+            }
+            else
+            {
+                if (moved)
+                {
+                    edited.SetInt(item.Table, "X", item.Row, cellX);
+                    edited.SetInt(item.Table, "Y", item.Row, cellY);
+                    edited.SetFloat(item.Table, "XF", item.Row, x - cellX);
+                    edited.SetFloat(item.Table, "YF", item.Row, y - cellY);
+                }
+                if (item.Table == "cannons")
+                {
+                    if (turned)
+                        edited.SetFloat("cannons", "Angle", item.Row,
+                            root.transform.eulerAngles.y * Mathf.Deg2Rad);
+                    if (raised) edited.SetFloat("cannons", "AddH", item.Row, item.ExtraHeight);
+                }
+            }
+            changed++;
+        }
+        return changed;
     }
 
     private static string Hash(byte[] data)
@@ -573,6 +923,10 @@ public sealed class PbStandaloneApp : MonoBehaviour
             if (GUI.Button(new Rect(left + 160, top + 78, 140, 25), "Delete selected"))
                 DeleteSelected();
         }
+        else if (selectedEntity != null)
+            GUI.Label(new Rect(left + 10, top + 53, 290, 22),
+                      selectedEntity.Table + " row " + selectedEntity.Row +
+                      " kind " + selectedEntity.Kind + " side " + selectedEntity.Side);
         if (GUI.Button(new Rect(left + 10, top + 78, 140, 25), "Add at center"))
             AddObject();
         if (GUI.Button(new Rect(left + 10, top + 107, 290, 25),
