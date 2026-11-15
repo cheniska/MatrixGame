@@ -1,0 +1,14 @@
+/Library/
+/Temp/
+/Logs/
+/UserSettings/
+/obj/
+/.vs/
+/Assets/Generated/
+/Assets/Generated.meta
+/Assets/Scenes/TrainingPreview.unity
+/Assets/Scenes/TrainingPreview.unity.meta
+/ProjectSettings/*
+!/ProjectSettings/ProjectVersion.txt
+/Packages/packages-lock.json
+
