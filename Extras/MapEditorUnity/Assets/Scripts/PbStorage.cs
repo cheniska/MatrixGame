@@ -110,6 +110,9 @@ public sealed class PbStorage
         return column;
     }
 
+    public bool HasColumn(string table, string name, int kind) =>
+        columns.TryGetValue(table + "/" + name, out Column column) && column.Kind == kind;
+
     public int Count(string table, string name, int kind)
     {
         Column column = GetColumn(table, name, kind);

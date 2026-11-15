@@ -12,6 +12,14 @@ public sealed class PbVoLoader
     {
         public Mesh Mesh;
         public Material[] Materials;
+        public Dictionary<int, Matrix4x4> Attachments;
+        public Dictionary<int, string> AttachmentNames;
+
+        public bool TryAttachment(int id, out Matrix4x4 matrix) =>
+            Attachments.TryGetValue(id, out matrix);
+
+        public string AttachmentName(int id) =>
+            AttachmentNames.TryGetValue(id, out string name) ? name : null;
     }
 
     private readonly string root;
@@ -38,7 +46,11 @@ public sealed class PbVoLoader
         {
             string relative = descriptor.Split('?')[0];
             string path = Resolve(relative);
-            if (!File.Exists(path)) MissingModels++;
+            if (!File.Exists(path))
+            {
+                MissingModels++;
+                Debug.LogWarning("VO preview missing: " + path);
+            }
             else
             {
                 result = ReadVo(path, descriptor);
@@ -155,7 +167,40 @@ public sealed class PbVoLoader
             material.mainTexture = texture;
             materials[i] = material;
         }
-        return new Asset { Mesh = mesh, Materials = materials };
+        var attachments = new Dictionary<int, Matrix4x4>();
+        var attachmentNames = new Dictionary<int, string>();
+        int matrixCount = vo.HasColumn("matrices", "name", 5)
+            ? vo.Count("matrices", "name", 5) : 0;
+        if (matrixCount > 0)
+        {
+            byte[] ids = vo.RawArray("matrices", "id", 1);
+            byte[] offsets = vo.RawArray("matrices", "disp", 1);
+            byte[] data = vo.RawArray("matrices", "data", 2);
+            if (ids.Length != matrixCount * 4 || offsets.Length != matrixCount * 4 ||
+                data.Length % 64 != 0)
+                throw new InvalidDataException("Invalid VO attachment table.");
+            for (int i = 0; i < matrixCount; i++)
+            {
+                int id = I(ids, i * 4);
+                int frame = I(offsets, i * 4);
+                if (frame < 0 || (long)(frame + 1) * 64 > data.Length)
+                    throw new InvalidDataException("VO attachment exceeds matrix data.");
+                int at = frame * 64;
+                // D3DX uses row vectors and Z up; Unity uses column vectors and Y up.
+                var m = new Matrix4x4();
+                m.SetRow(0, new Vector4(F(data, at), F(data, at + 32),
+                                        F(data, at + 16), F(data, at + 48)));
+                m.SetRow(1, new Vector4(F(data, at + 8), F(data, at + 40),
+                                        F(data, at + 24), F(data, at + 56)));
+                m.SetRow(2, new Vector4(F(data, at + 4), F(data, at + 36),
+                                        F(data, at + 20), F(data, at + 52)));
+                m.SetRow(3, new Vector4(0, 0, 0, 1));
+                attachments[id] = m;
+                attachmentNames[id] = vo.String("matrices", "name", i);
+            }
+        }
+        return new Asset { Mesh = mesh, Materials = materials,
+                           Attachments = attachments, AttachmentNames = attachmentNames };
     }
 
     private Texture2D FindTexture(string modelPath, string voName, string mapName)

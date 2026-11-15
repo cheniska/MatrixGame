@@ -100,7 +100,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
         }
         if (smokeMode == "1" || smokeMode == "add" || smokeMode == "delete" ||
             smokeMode == "terrain" || smokeMode == "models" || smokeMode == "camera" ||
-            smokeMode == "entities" || smokeMode == "textures")
+            smokeMode == "entities" || smokeMode == "textures" || smokeMode == "mirror")
         {
             if (storage == null)
             {
@@ -131,6 +131,19 @@ public sealed class PbStandaloneApp : MonoBehaviour
                     entity.transform.position += Vector3.right * CellSize;
                 }
             }
+            if (smokeMode == "mirror")
+            {
+                if (Mathf.Abs(terrainMesh.vertices[0].x - width * CellSize) > 0.001f)
+                    throw new InvalidOperationException("Map X direction is not mirrored.");
+                GameObject cannon = entityRoots.Find(root =>
+                    root.GetComponent<PbMapEntity>().Table == "cannons");
+                GameObject robot = entityRoots.Find(root =>
+                    root.GetComponent<PbMapEntity>().Table == "robots");
+                if (cannon == null || cannon.transform.childCount < 3 ||
+                    robot == null || robot.transform.childCount < 3)
+                    throw new InvalidOperationException("Composite entity preview is incomplete.");
+                objects[0].transform.position += Vector3.right * CellSize;
+            }
             if (smokeMode == "camera")
             {
                 ToggleCamera();
@@ -154,8 +167,11 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 throw new InvalidOperationException("Smoke test terrain height mismatch.");
             if (smokeMode == "entities")
                 foreach (string table in new[] { "buildings", "cannons", "robots" })
-                    if (check.Int(table, "X", 0) != storage.Int(table, "X", 0) + 1)
+                    if (check.Int(table, "X", 0) != storage.Int(table, "X", 0) - 1)
                         throw new InvalidOperationException("Smoke test entity position mismatch: " + table);
+            if (smokeMode == "mirror" &&
+                check.Int("objects", "X", 0) != storage.Int("objects", "X", 0) - 1)
+                throw new InvalidOperationException("Mirrored object position was saved incorrectly.");
             Debug.Log("PB standalone smoke succeeded: " + outputPath);
             Application.Quit();
         }
@@ -222,7 +238,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
             {
                 int type = parsed.Int("objects", "Index", row);
                 Vector3 position = new Vector3(
-                    (parsed.Int("objects", "X", row) + parsed.Float("objects", "XF", row)) * CellSize,
+                    MapX(parsed.Int("objects", "X", row) + parsed.Float("objects", "XF", row)),
                     parsed.Float("objects", "Height", row) + 8f,
                     (parsed.Int("objects", "Y", row) + parsed.Float("objects", "YF", row)) * CellSize);
                 CreateMarker(row, type, position, parsed.Float("objects", "Angle", row));
@@ -256,7 +272,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
         marker.name = "Object " + row + " (type " + type + ")";
         marker.transform.SetParent(mapRoot.transform);
         marker.transform.position = position;
-        marker.transform.rotation = Quaternion.Euler(0, angle * Mathf.Rad2Deg, 0);
+        marker.transform.rotation = Quaternion.Euler(0, -angle * Mathf.Rad2Deg, 0);
         var item = marker.AddComponent<PbPlacedObject>();
         item.Row = row;
         item.TypeIndex = type;
@@ -326,15 +342,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 Destroy(child.gameObject);
             }
             PbMapEntity entity = root.GetComponent<PbMapEntity>();
-            if (entity.Table == "buildings")
-                AttachEntityModel(root, "Matrix/Building/b" + entity.Kind + ".vo", 0f);
-            else if (entity.Table == "cannons")
-            {
-                AttachEntityModel(root, "Matrix/Cannon/Basis.vo", 0f);
-                AttachEntityModel(root, "Matrix/Cannon/Turret" + entity.Kind + ".vo", 0f);
-            }
-            else if (entity.Table == "robots")
-                AttachEntityModel(root, "Matrix/Robot/Chassis" + entity.Kind + ".vo", 0f);
+            AttachEntityParts(root, entity);
         }
         message = "VO: " + voLoader.LoadedModels + " loaded / " +
                   voLoader.MissingModels + " missing / " + voLoader.FailedModels +
@@ -358,7 +366,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
             float y = storage.Int("buildings", "Y", row);
             float angle = storage.Int("buildings", "Angle", row) * 90f;
             GameObject root = CreateEntity("buildings", row, kind, side, x, y, angle, 0f);
-            AttachEntityModel(root, "Matrix/Building/b" + kind + ".vo", 0f);
+            AttachEntityParts(root, root.GetComponent<PbMapEntity>());
         }
         int cannons = storage.Count("cannons", "X", 0);
         for (int row = 0; row < cannons; row++)
@@ -370,8 +378,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
             float angle = storage.Float("cannons", "Angle", row) * Mathf.Rad2Deg;
             float addHeight = storage.Float("cannons", "AddH", row);
             GameObject root = CreateEntity("cannons", row, kind, side, x, y, angle, addHeight);
-            AttachEntityModel(root, "Matrix/Cannon/Basis.vo", 0f);
-            AttachEntityModel(root, "Matrix/Cannon/Turret" + kind + ".vo", 0f);
+            AttachEntityParts(root, root.GetComponent<PbMapEntity>());
         }
         int robots = storage.Count("robots", "X", 0);
         for (int row = 0; row < robots; row++)
@@ -381,8 +388,9 @@ public sealed class PbStandaloneApp : MonoBehaviour
             float y = storage.Int("robots", "Y", row) + storage.Float("robots", "YF", row);
             string units = storage.String("robots", "Units", row);
             int chassis = ChassisKind(units);
-            GameObject root = CreateEntity("robots", row, chassis, side, x, y, 0f, 0f);
-            AttachEntityModel(root, "Matrix/Robot/Chassis" + chassis + ".vo", 0f);
+            float angle = ChassisAngle(units) * Mathf.Rad2Deg;
+            GameObject root = CreateEntity("robots", row, chassis, side, x, y, angle, 0f);
+            AttachEntityParts(root, root.GetComponent<PbMapEntity>());
         }
     }
 
@@ -391,9 +399,9 @@ public sealed class PbStandaloneApp : MonoBehaviour
     {
         var root = new GameObject(table + " " + row + " kind " + kind + " side " + side);
         root.transform.SetParent(mapRoot.transform);
-        root.transform.position = new Vector3(cellX * CellSize,
+        root.transform.position = new Vector3(MapX(cellX),
             SampleTerrainHeight(cellX, cellY) + extraHeight, cellY * CellSize);
-        root.transform.rotation = Quaternion.Euler(0, angle, 0);
+        root.transform.rotation = Quaternion.Euler(0, -angle, 0);
         var info = root.AddComponent<PbMapEntity>();
         info.Table = table;
         info.Row = row;
@@ -408,7 +416,98 @@ public sealed class PbStandaloneApp : MonoBehaviour
         return root;
     }
 
-    private void AttachEntityModel(GameObject root, string descriptor, float raise)
+    private void AttachEntityParts(GameObject root, PbMapEntity entity)
+    {
+        if (entity.Table == "buildings")
+        {
+            AttachEntityModel(root, "Matrix/Building/b" + entity.Kind + ".vo", Vector3.zero);
+            return;
+        }
+        if (entity.Table == "cannons")
+        {
+            Vector3 position = Vector3.zero;
+            string descriptor = "Matrix/Cannon/Basis.vo";
+            for (int part = 0; part < 4; part++)
+            {
+                AttachEntityModel(root, descriptor, position);
+                PbVoLoader.Asset asset = voLoader.Load(descriptor);
+                if (asset == null || !asset.TryAttachment(20, out Matrix4x4 socket)) break;
+                string name = asset.AttachmentName(20);
+                if (string.IsNullOrEmpty(name) || (name[0] != 'T' && name[0] != 'S')) break;
+                position += (Vector3)socket.GetColumn(3);
+                descriptor = "Matrix/Cannon/" + name + entity.Kind + ".vo";
+            }
+            return;
+        }
+        if (entity.Table == "robots") AttachRobotParts(root, entity);
+    }
+
+    private void AttachRobotParts(GameObject root, PbMapEntity entity)
+    {
+        string units = storage.String("robots", "Units", entity.Row);
+        string chassis = "Matrix/Robot/Chassis" + entity.Kind + ".vo";
+        AttachEntityModel(root, chassis, Vector3.zero);
+        Vector3 position = Vector3.zero;
+        PbVoLoader.Asset chassisAsset = voLoader.Load(chassis);
+        if (chassisAsset != null && chassisAsset.TryAttachment(1, out Matrix4x4 chassisSocket))
+            position = (Vector3)chassisSocket.GetColumn(3);
+        string armor = null;
+        var usedSockets = new HashSet<int>();
+        foreach (string part in units.Split('|'))
+        {
+            string[] fields = part.Split(',');
+            if (fields.Length < 2 || !int.TryParse(fields[0].Trim(), out int type) ||
+                !int.TryParse(fields[1].Trim(), out int kind) || kind <= 0) continue;
+            if (type == 3)
+            {
+                armor = "Matrix/Robot/Armor" + kind + ".vo";
+                AttachEntityModel(root, armor, position);
+            }
+            else if (type == 4)
+            {
+                Vector3 headPosition = position;
+                PbVoLoader.Asset armorAsset = armor == null ? null : voLoader.Load(armor);
+                if (armorAsset != null && armorAsset.TryAttachment(1, out Matrix4x4 headSocket))
+                    headPosition += (Vector3)headSocket.GetColumn(3);
+                AttachEntityModel(root, "Matrix/Robot/Head" + kind + ".vo", headPosition);
+            }
+            else if (type == 2)
+            {
+                Vector3 weaponPosition = position;
+                Quaternion weaponRotation = Quaternion.identity;
+                PbVoLoader.Asset armorAsset = armor == null ? null : voLoader.Load(armor);
+                if (armorAsset != null)
+                {
+                    var ids = new List<int>(armorAsset.AttachmentNames.Keys);
+                    ids.Sort();
+                    foreach (int id in ids)
+                    {
+                        if (id < 20 || usedSockets.Contains(id)) continue;
+                        string name = armorAsset.AttachmentName(id);
+                        string[] allowed = name.Split(',');
+                        if (allowed.Length < 2 || allowed[0].Trim() != "W") continue;
+                        bool accepts = false;
+                        foreach (string token in allowed)
+                            if (int.TryParse(token.Trim(), out int permitted) && permitted == kind)
+                                accepts = true;
+                        if (!accepts) continue;
+                        if (armorAsset.TryAttachment(id, out Matrix4x4 socket))
+                        {
+                            weaponPosition += (Vector3)socket.GetColumn(3);
+                            weaponRotation = socket.rotation;
+                            usedSockets.Add(id);
+                            break;
+                        }
+                    }
+                }
+                GameObject weapon = AttachEntityModel(root,
+                    "Matrix/Robot/Weapon" + kind + ".vo", weaponPosition);
+                if (weapon != null) weapon.transform.localRotation = weaponRotation;
+            }
+        }
+    }
+
+    private GameObject AttachEntityModel(GameObject root, string descriptor, Vector3 position)
     {
         PbVoLoader.Asset asset = voLoader.Load(descriptor);
         if (asset == null)
@@ -416,14 +515,14 @@ public sealed class PbStandaloneApp : MonoBehaviour
             GameObject cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
             cube.name = "Missing " + descriptor;
             cube.transform.SetParent(root.transform, false);
-            cube.transform.localPosition = Vector3.up * (10f + raise);
+            cube.transform.localPosition = position + Vector3.up * 10f;
             cube.transform.localScale = Vector3.one * 20f;
             cube.GetComponent<Renderer>().sharedMaterial = markerMaterial;
-            return;
+            return cube;
         }
         var visual = new GameObject(Path.GetFileName(descriptor));
         visual.transform.SetParent(root.transform, false);
-        visual.transform.localPosition = Vector3.up * raise;
+        visual.transform.localPosition = position;
         visual.AddComponent<MeshFilter>().sharedMesh = asset.Mesh;
         visual.AddComponent<MeshRenderer>().sharedMaterials = asset.Materials;
         var collider = visual.AddComponent<BoxCollider>();
@@ -431,6 +530,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
         Vector3 size = asset.Mesh.bounds.size;
         collider.size = new Vector3(Mathf.Max(size.x, 1f),
                                     Mathf.Max(size.y, 1f), Mathf.Max(size.z, 1f));
+        return visual;
     }
 
     private float SampleTerrainHeight(float cellX, float cellY)
@@ -459,6 +559,19 @@ public sealed class PbStandaloneApp : MonoBehaviour
         return 1;
     }
 
+    private static float ChassisAngle(string units)
+    {
+        foreach (string part in units.Split('|'))
+        {
+            string[] fields = part.Split(',');
+            if (fields.Length >= 3 && fields[0].Trim() == "1" &&
+                float.TryParse(fields[2].Trim(), System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out float angle))
+                return angle;
+        }
+        return 0f;
+    }
+
     private void ChangeType(PbPlacedObject item, int type)
     {
         if (item == null || item.TypeIndex == type) return;
@@ -480,6 +593,9 @@ public sealed class PbStandaloneApp : MonoBehaviour
         message = "Added object type " + activeType + "; save as a new .map.";
     }
 
+    private float MapX(float cellX) => (width - cellX) * CellSize;
+    private float CellX(float worldX) => width - worldX / CellSize;
+
     private void DeleteSelected()
     {
         if (selected == null) return;
@@ -496,7 +612,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
         var vertices = new Vector3[columns * (height + 1)];
         for (int y = 0; y <= height; y++)
             for (int x = 0; x <= width; x++)
-                vertices[y * columns + x] = new Vector3(x * CellSize,
+                vertices[y * columns + x] = new Vector3(MapX(x),
                     storage.Float("points", "Z", y * columns + x), y * CellSize);
         var triangles = new int[width * height * 6];
         for (int y = 0; y < height; y++)
@@ -505,11 +621,11 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 int vertex = y * columns + x;
                 int index = (y * width + x) * 6;
                 triangles[index] = vertex;
-                triangles[index + 1] = vertex + columns;
-                triangles[index + 2] = vertex + 1;
+                triangles[index + 1] = vertex + 1;
+                triangles[index + 2] = vertex + columns;
                 triangles[index + 3] = vertex + 1;
-                triangles[index + 4] = vertex + columns;
-                triangles[index + 5] = vertex + columns + 1;
+                triangles[index + 4] = vertex + columns + 1;
+                triangles[index + 5] = vertex + columns;
             }
         terrainMesh = new Mesh { indexFormat = IndexFormat.UInt32, vertices = vertices, triangles = triangles };
         terrainMesh.RecalculateNormals();
@@ -568,11 +684,11 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 int material = unit == 0 || palette < 0 || palette >= paletteCount
                     ? 0 : palette + 1;
                 triangles[material].Add(at);
-                triangles[material].Add(at + 1);
-                triangles[material].Add(at + 2);
                 triangles[material].Add(at + 2);
                 triangles[material].Add(at + 1);
+                triangles[material].Add(at + 2);
                 triangles[material].Add(at + 3);
+                triangles[material].Add(at + 1);
             }
         terrainVisualMesh = new Mesh { name = "PB textured terrain" };
         terrainVisualMesh.indexFormat = IndexFormat.UInt32;
@@ -675,7 +791,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 if (Input.GetKeyDown(KeyCode.PageUp)) selectedEntity.ExtraHeight += 1f;
                 if (Input.GetKeyDown(KeyCode.PageDown)) selectedEntity.ExtraHeight -= 1f;
             }
-            float x = selectedEntity.transform.position.x / CellSize;
+            float x = CellX(selectedEntity.transform.position.x);
             float y = selectedEntity.transform.position.z / CellSize;
             Vector3 p = selectedEntity.transform.position;
             p.y = SampleTerrainHeight(x, y) + selectedEntity.ExtraHeight;
@@ -745,7 +861,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
 
     private void SculptTerrain(Vector3 point, float amount)
     {
-        int x = Mathf.Clamp(Mathf.RoundToInt(point.x / CellSize), 0, width);
+        int x = Mathf.Clamp(Mathf.RoundToInt(CellX(point.x)), 0, width);
         int y = Mathf.Clamp(Mathf.RoundToInt(point.z / CellSize), 0, height);
         int index = y * (width + 1) + x;
         Vector3[] vertices = terrainMesh.vertices;
@@ -771,7 +887,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
         {
             PbMapEntity entity = entityRoot.GetComponent<PbMapEntity>();
             Vector3 p = entityRoot.transform.position;
-            p.y = SampleTerrainHeight(p.x / CellSize, p.z / CellSize) + entity.ExtraHeight;
+            p.y = SampleTerrainHeight(CellX(p.x), p.z / CellSize) + entity.ExtraHeight;
             entityRoot.transform.position = p;
         }
         editedTerrain.Add(index);
@@ -802,7 +918,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
             if (File.Exists(outputPath)) throw new IOException("Output already exists. Choose a new filename.");
             if (Hash(File.ReadAllBytes(mapPath)) != sourceHash)
                 throw new IOException("Source map changed. Load it again.");
-            PbStorage edited = PbObjectWriter.Save(storage, objects, CellSize, out int changed);
+            PbStorage edited = PbObjectWriter.Save(storage, objects, CellSize, width, out int changed);
             int changedEntities = SaveEntityPositions(edited);
             if (editedTerrain.Count > 0)
             {
@@ -839,7 +955,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
                                            item.ImportedRotation) > 0.01f;
             bool raised = Mathf.Abs(item.ExtraHeight - item.ImportedExtraHeight) > 0.0001f;
             if (!moved && !turned && !raised) continue;
-            float x = p.x / CellSize;
+            float x = CellX(p.x);
             float y = p.z / CellSize;
             int cellX = Mathf.FloorToInt(x);
             int cellY = Mathf.FloorToInt(y);
@@ -852,7 +968,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 }
                 if (turned)
                     edited.SetInt("buildings", "Angle", item.Row,
-                                  Mathf.RoundToInt(root.transform.eulerAngles.y / 90f) % 4);
+                                  ((Mathf.RoundToInt(-root.transform.eulerAngles.y / 90f) % 4) + 4) % 4);
             }
             else
             {
@@ -867,7 +983,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 {
                     if (turned)
                         edited.SetFloat("cannons", "Angle", item.Row,
-                            root.transform.eulerAngles.y * Mathf.Deg2Rad);
+                            -Mathf.DeltaAngle(0f, root.transform.eulerAngles.y) * Mathf.Deg2Rad);
                     if (raised) edited.SetFloat("cannons", "AddH", item.Row, item.ExtraHeight);
                 }
             }

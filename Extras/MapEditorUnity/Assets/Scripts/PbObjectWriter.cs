@@ -10,7 +10,7 @@ public static class PbObjectWriter
         { "XF", "YF", "Height", "Angle", "AngleX", "AngleY", "Scale" };
 
     public static PbStorage Save(PbStorage source, IList<PbPlacedObject> objects,
-                                 float cellSize, out int changed)
+                                 float cellSize, int mapWidth, out int changed)
     {
         int originalCount = source.Count("objects", "Index", 0);
         bool structural = objects.Count != originalCount;
@@ -36,10 +36,10 @@ public static class PbObjectWriter
                 bool retyped = item.TypeIndex != source.Int("objects", "Index", item.Row);
                 if (!moved && !rotated && !retyped) continue;
                 if (retyped) result.SetInt("objects", "Index", item.Row, item.TypeIndex);
-                if (moved) SetPosition(result, item, cellSize);
+                if (moved) SetPosition(result, item, cellSize, mapWidth);
                 if (rotated)
                     result.SetFloat("objects", "Angle", item.Row,
-                                    item.transform.eulerAngles.y * Mathf.Deg2Rad);
+                                    -Mathf.DeltaAngle(0f, item.transform.eulerAngles.y) * Mathf.Deg2Rad);
                 changed++;
             }
             return result;
@@ -49,14 +49,14 @@ public static class PbObjectWriter
         {
             var bytes = new byte[objects.Count * 4];
             for (int row = 0; row < objects.Count; row++)
-                Write(bytes, row, GetInt(source, objects[row], field, cellSize));
+                Write(bytes, row, GetInt(source, objects[row], field, cellSize, mapWidth));
             result = result.ReplaceArray("objects", field, 0, 0, bytes);
         }
         foreach (string field in FloatFields)
         {
             var bytes = new byte[objects.Count * 4];
             for (int row = 0; row < objects.Count; row++)
-                Write(bytes, row, GetFloat(source, objects[row], field, cellSize));
+                Write(bytes, row, GetFloat(source, objects[row], field, cellSize, mapWidth));
             result = result.ReplaceArray("objects", field, 3, 0, bytes);
         }
         result = result.ReplaceProperty("ObjectsCount", objects.Count.ToString(
@@ -71,13 +71,13 @@ public static class PbObjectWriter
     private static bool Rotated(PbPlacedObject item) => item.Row < 0 ||
         Quaternion.Angle(item.transform.rotation, item.ImportedRotation) > 0.01f;
 
-    private static void Split(PbPlacedObject item, float cellSize,
+    private static void Split(PbPlacedObject item, float cellSize, int mapWidth,
                               out int x, out int y, out float xf, out float yf)
     {
         Vector3 p = item.transform.position;
         if (!Finite(p.x) || !Finite(p.y) || !Finite(p.z))
             throw new InvalidDataException("Nonfinite object position.");
-        float xx = p.x / cellSize;
+        float xx = mapWidth - p.x / cellSize;
         float yy = p.z / cellSize;
         x = Mathf.FloorToInt(xx);
         y = Mathf.FloorToInt(yy);
@@ -86,17 +86,17 @@ public static class PbObjectWriter
     }
 
     private static int GetInt(PbStorage source, PbPlacedObject item,
-                              string field, float cellSize)
+                              string field, float cellSize, int mapWidth)
     {
         if (field == "Index") return item.TypeIndex;
         if (item.Row >= 0 && !Moved(item))
             return source.Int("objects", field, item.Row);
-        Split(item, cellSize, out int x, out int y, out _, out _);
+        Split(item, cellSize, mapWidth, out int x, out int y, out _, out _);
         return field == "X" ? x : y;
     }
 
     private static float GetFloat(PbStorage source, PbPlacedObject item,
-                                  string field, float cellSize)
+                                  string field, float cellSize, int mapWidth)
     {
         if (item.Row >= 0 && field != "Angle" && field != "XF" &&
             field != "YF" && field != "Height")
@@ -106,18 +106,18 @@ public static class PbObjectWriter
         if (field == "Angle")
             return item.Row >= 0 && !Rotated(item)
                 ? source.Float("objects", "Angle", item.Row)
-                : item.transform.eulerAngles.y * Mathf.Deg2Rad;
+                : -Mathf.DeltaAngle(0f, item.transform.eulerAngles.y) * Mathf.Deg2Rad;
         if (field == "AngleX" || field == "AngleY") return 0f;
         if (field == "Scale") return 1f;
-        Split(item, cellSize, out _, out _, out float xf, out float yf);
+        Split(item, cellSize, mapWidth, out _, out _, out float xf, out float yf);
         if (field == "XF") return xf;
         if (field == "YF") return yf;
         return item.transform.position.y - 8f;
     }
 
-    private static void SetPosition(PbStorage storage, PbPlacedObject item, float cellSize)
+    private static void SetPosition(PbStorage storage, PbPlacedObject item, float cellSize, int mapWidth)
     {
-        Split(item, cellSize, out int x, out int y, out float xf, out float yf);
+        Split(item, cellSize, mapWidth, out int x, out int y, out float xf, out float yf);
         storage.SetInt("objects", "X", item.Row, x);
         storage.SetInt("objects", "Y", item.Row, y);
         storage.SetFloat("objects", "XF", item.Row, xf);
