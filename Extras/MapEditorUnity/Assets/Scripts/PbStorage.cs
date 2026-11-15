@@ -16,6 +16,9 @@ public sealed class PbStorage
     {
         internal int Kind;
         internal int ElementSize;
+        internal int BufferStart;
+        internal int BufferLength;
+        internal int LengthFieldOffset;
         internal readonly List<ArrayInfo> Arrays = new List<ArrayInfo>();
     }
 
@@ -54,7 +57,14 @@ public sealed class PbStorage
                 if (arrayCount < 0 || arrayCount > 1000000 || tableOffset < 12 ||
                     (long)tableOffset + 12L * arrayCount > length)
                     throw new InvalidDataException("Invalid CDataBuf header.");
-                var column = new Column { Kind = kind, ElementSize = elementSize };
+                var column = new Column
+                {
+                    Kind = kind,
+                    ElementSize = elementSize,
+                    BufferStart = bufferStart,
+                    BufferLength = length,
+                    LengthFieldOffset = bufferStart - 4
+                };
                 for (int index = 0; index < arrayCount; index++)
                 {
                     int entry = bufferStart + tableOffset + 12 * index;
@@ -163,6 +173,82 @@ public sealed class PbStorage
     }
 
     public byte[] Bytes() => (byte[])data.Clone();
+
+    // Rebuild one CDataBuf, copying every other column and table byte for byte.
+    // Each array keeps its current contents unless a replacement is supplied.
+    public PbStorage ReplaceArray(string table, string name, int kind,
+                                  int arrayIndex, byte[] replacement)
+    {
+        Column column = GetColumn(table, name, kind);
+        if (arrayIndex < 0 || arrayIndex >= column.Arrays.Count ||
+            replacement == null || column.ElementSize < 1 ||
+            replacement.Length % column.ElementSize != 0)
+            throw new InvalidDataException("Invalid replacement array.");
+        var chunks = new byte[column.Arrays.Count][];
+        int totalData = 0;
+        for (int i = 0; i < chunks.Length; i++)
+        {
+            ArrayInfo array = column.Arrays[i];
+            if (i == arrayIndex) chunks[i] = replacement;
+            else
+            {
+                chunks[i] = new byte[array.Count * column.ElementSize];
+                Buffer.BlockCopy(data, array.Offset, chunks[i], 0, chunks[i].Length);
+            }
+            totalData = checked(totalData + chunks[i].Length);
+        }
+        int tableOffset = checked(12 + totalData);
+        int newLength = checked(tableOffset + chunks.Length * 12);
+        var buffer = new byte[newLength];
+        WriteInt(buffer, 0, tableOffset);
+        WriteInt(buffer, 4, chunks.Length);
+        WriteInt(buffer, 8, column.ElementSize);
+        int cursor = 12;
+        for (int i = 0; i < chunks.Length; i++)
+        {
+            Buffer.BlockCopy(chunks[i], 0, buffer, cursor, chunks[i].Length);
+            int count = chunks[i].Length / column.ElementSize;
+            int entry = tableOffset + i * 12;
+            WriteInt(buffer, entry, cursor);
+            WriteInt(buffer, entry + 4, count);
+            WriteInt(buffer, entry + 8, count);
+            cursor += chunks[i].Length;
+        }
+        int oldEnd = column.BufferStart + column.BufferLength;
+        var result = new byte[checked(data.Length - column.BufferLength + newLength)];
+        Buffer.BlockCopy(data, 0, result, 0, column.BufferStart);
+        WriteInt(result, column.LengthFieldOffset, newLength);
+        Buffer.BlockCopy(buffer, 0, result, column.BufferStart, newLength);
+        Buffer.BlockCopy(data, oldEnd, result, column.BufferStart + newLength,
+                         data.Length - oldEnd);
+        return new PbStorage(result);
+    }
+
+    public PbStorage ReplaceProperty(string key, string value)
+    {
+        int count = Count("properties", "Name", 5);
+        for (int i = 0; i < count; i++)
+            if (String("properties", "Name", i) == key)
+            {
+                ArrayInfo old = GetColumn("properties", "Value", 5).Arrays[i];
+                bool terminated = old.Count > 0 &&
+                    BitConverter.ToUInt16(data, old.Offset + old.Count * 2 - 2) == 0;
+                byte[] encoded = Encoding.Unicode.GetBytes(value + (terminated ? "\0" : ""));
+                if (encoded.Length == old.Count * 2)
+                {
+                    byte[] copy = Bytes();
+                    Buffer.BlockCopy(encoded, 0, copy, old.Offset, encoded.Length);
+                    return new PbStorage(copy);
+                }
+                return ReplaceArray("properties", "Value", 5, i, encoded);
+            }
+        throw new InvalidDataException("Missing map property " + key);
+    }
+
+    private static void WriteInt(byte[] target, int offset, int value)
+    {
+        Buffer.BlockCopy(BitConverter.GetBytes(value), 0, target, offset, 4);
+    }
 
     private static void CheckRow(Column column, int row, int elementSize)
     {
