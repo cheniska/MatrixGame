@@ -4,7 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 
-internal sealed class PbStorage
+public sealed class PbStorage
 {
     internal sealed class ArrayInfo
     {
@@ -22,7 +22,7 @@ internal sealed class PbStorage
     private readonly byte[] data;
     private readonly Dictionary<string, Column> columns = new Dictionary<string, Column>(StringComparer.Ordinal);
 
-    internal PbStorage(byte[] source)
+    public PbStorage(byte[] source)
     {
         data = (byte[])source.Clone();
         if (data.Length < 12 || Encoding.ASCII.GetString(data, 0, 4) != "STRG" || ReadInt(4) != 0)
@@ -100,20 +100,20 @@ internal sealed class PbStorage
         return column;
     }
 
-    internal int Count(string table, string name, int kind)
+    public int Count(string table, string name, int kind)
     {
         Column column = GetColumn(table, name, kind);
         return kind == 5 ? column.Arrays.Count : column.Arrays.Count == 0 ? 0 : column.Arrays[0].Count;
     }
 
-    internal int Int(string table, string name, int row, int kind = 0)
+    public int Int(string table, string name, int row, int kind = 0)
     {
         Column column = GetColumn(table, name, kind);
         CheckRow(column, row, 4);
         return ReadInt(column.Arrays[0].Offset + 4 * row);
     }
 
-    internal float Float(string table, string name, int row)
+    public float Float(string table, string name, int row)
     {
         Column column = GetColumn(table, name, 3);
         CheckRow(column, row, 4);
@@ -140,7 +140,7 @@ internal sealed class PbStorage
         return result;
     }
 
-    internal int PropertyInt(string key)
+    public int PropertyInt(string key)
     {
         if (!Properties().TryGetValue(key, out string raw) ||
             !int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value))
@@ -148,21 +148,21 @@ internal sealed class PbStorage
         return value;
     }
 
-    internal void SetInt(string table, string name, int row, int value)
+    public void SetInt(string table, string name, int row, int value)
     {
         Column column = GetColumn(table, name, 0);
         CheckRow(column, row, 4);
         Buffer.BlockCopy(BitConverter.GetBytes(value), 0, data, column.Arrays[0].Offset + 4 * row, 4);
     }
 
-    internal void SetFloat(string table, string name, int row, float value)
+    public void SetFloat(string table, string name, int row, float value)
     {
         Column column = GetColumn(table, name, 3);
         CheckRow(column, row, 4);
         Buffer.BlockCopy(BitConverter.GetBytes(value), 0, data, column.Arrays[0].Offset + 4 * row, 4);
     }
 
-    internal byte[] Bytes() => (byte[])data.Clone();
+    public byte[] Bytes() => (byte[])data.Clone();
 
     private static void CheckRow(Column column, int row, int elementSize)
     {
