@@ -11,6 +11,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
     private const float MoveStep = 20f;
     private string mapPath = "";
     private string outputPath = "";
+    private string modelRoot = "";
     private string message = "Enter an editor .map path, then press Load.";
     private PbStorage storage;
     private string sourceHash;
@@ -18,7 +19,11 @@ public sealed class PbStandaloneApp : MonoBehaviour
     private Camera viewCamera;
     private readonly List<PbPlacedObject> objects = new List<PbPlacedObject>();
     private readonly List<string> typeNames = new List<string>();
+    private readonly List<string> typeData = new List<string>();
+    private PbVoLoader voLoader;
     private PbPlacedObject selected;
+    private Renderer selectedRenderer;
+    private Material[] selectedOriginalMaterials;
     private Vector2 catalogScroll;
     private string typeSearch = "";
     private int activeType;
@@ -28,6 +33,11 @@ public sealed class PbStandaloneApp : MonoBehaviour
     private MeshCollider terrainCollider;
     private readonly HashSet<int> editedTerrain = new HashSet<int>();
     private bool terrainBrush;
+    private bool perspective;
+    private Vector3 cameraTarget;
+    private float cameraYaw = 35f;
+    private float cameraPitch = 55f;
+    private float cameraDistance;
     private int width;
     private int height;
 
@@ -52,6 +62,13 @@ public sealed class PbStandaloneApp : MonoBehaviour
                          MakeMaterial(new Color(0.85f, 0.30f, 0.16f));
         selectedMaterial = Resources.Load<Material>("PBSelected") ??
                            MakeMaterial(Color.yellow);
+        modelRoot = Environment.GetEnvironmentVariable("PB_MODEL_ROOT");
+        if (string.IsNullOrEmpty(modelRoot))
+        {
+            string adjacent = Path.GetFullPath(Path.Combine(Application.dataPath, "../Models"));
+            modelRoot = Directory.Exists(adjacent) ? adjacent :
+                "E:/disasm2500_dev/MatrixGame_analysis/robots_pkg_extract";
+        }
 
         string[] args = Environment.GetCommandLineArgs();
         for (int i = 1; i < args.Length; i++)
@@ -64,8 +81,16 @@ public sealed class PbStandaloneApp : MonoBehaviour
             mapPath = Path.GetFullPath(Path.Combine(Application.dataPath, "../Maps/Training.map"));
         if (File.Exists(mapPath)) LoadMap();
         string smokeMode = Environment.GetEnvironmentVariable("PB_EDITOR_SMOKE");
+        if (smokeMode == "preview")
+        {
+            if (storage == null || voLoader.LoadedModels < 1)
+                throw new InvalidOperationException("Preview test could not load models.");
+            ToggleCamera();
+            CapturePreview(Environment.GetEnvironmentVariable("PB_EDITOR_PREVIEW_OUTPUT"));
+            Application.Quit();
+        }
         if (smokeMode == "1" || smokeMode == "add" || smokeMode == "delete" ||
-            smokeMode == "terrain")
+            smokeMode == "terrain" || smokeMode == "models" || smokeMode == "camera")
         {
             if (storage == null) throw new InvalidOperationException("Smoke test could not load the map.");
             string smokeOutput = Environment.GetEnvironmentVariable("PB_EDITOR_SMOKE_OUTPUT");
@@ -75,6 +100,15 @@ public sealed class PbStandaloneApp : MonoBehaviour
             int expectedCount = objects.Count;
             if (smokeMode == "add") { AddObject(); expectedCount++; }
             if (smokeMode == "delete") { Select(objects[0]); DeleteSelected(); expectedCount--; }
+            if (smokeMode == "models" && (voLoader.LoadedModels < 1 ||
+                voLoader.MissingModels != 0 || voLoader.FailedModels != 0))
+                throw new InvalidOperationException("Smoke test could not load all VO types.");
+            if (smokeMode == "camera")
+            {
+                ToggleCamera();
+                if (!perspective || viewCamera.orthographic)
+                    throw new InvalidOperationException("Perspective camera did not activate.");
+            }
             int terrainIndex = (height / 2) * (width + 1) + width / 2;
             float originalHeight = storage.Float("points", "Z", terrainIndex);
             if (smokeMode == "terrain")
@@ -125,9 +159,12 @@ public sealed class PbStandaloneApp : MonoBehaviour
             if (mapRoot != null) Destroy(mapRoot);
             objects.Clear();
             typeNames.Clear();
+            typeData.Clear();
             editedTerrain.Clear();
             terrainBrush = false;
             selected = null;
+            selectedRenderer = null;
+            selectedOriginalMaterials = null;
             storage = parsed;
             width = newWidth;
             height = newHeight;
@@ -138,8 +175,14 @@ public sealed class PbStandaloneApp : MonoBehaviour
             mapRoot = new GameObject("PB Map");
             BuildTerrain();
             int typeCount = parsed.Count("objtypes", "Name", 5);
+            if (parsed.Count("objtypes", "Data", 5) != typeCount)
+                throw new InvalidDataException("Object type catalog columns differ.");
             for (int type = 0; type < typeCount; type++)
+            {
                 typeNames.Add(parsed.String("objtypes", "Name", type));
+                typeData.Add(parsed.String("objtypes", "Data", type));
+            }
+            voLoader = new PbVoLoader(modelRoot);
             activeType = 0;
             for (int row = 0; row < count; row++)
             {
@@ -155,7 +198,13 @@ public sealed class PbStandaloneApp : MonoBehaviour
             viewCamera.transform.rotation = Quaternion.Euler(90, 0, 0);
             viewCamera.orthographicSize = Mathf.Max(width, height) * CellSize * 0.55f;
             viewCamera.farClipPlane = 10000f;
-            message = "Loaded " + width + " x " + height + ", objects: " + count;
+            cameraTarget = new Vector3(width * CellSize / 2f, 0f, height * CellSize / 2f);
+            cameraDistance = Mathf.Max(width, height) * CellSize * 0.9f;
+            if (perspective) PositionPerspectiveCamera();
+            message = "Loaded " + width + " x " + height + ", objects: " + count +
+                      ", VO: " + voLoader.LoadedModels + " loaded / " +
+                      voLoader.MissingModels + " missing / " + voLoader.FailedModels +
+                      " failed; textures: " + voLoader.LoadedTextures;
             Debug.Log("PB standalone " + message);
         }
         catch (Exception error)
@@ -167,26 +216,82 @@ public sealed class PbStandaloneApp : MonoBehaviour
 
     private PbPlacedObject CreateMarker(int row, int type, Vector3 position, float angle)
     {
-        GameObject marker = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        GameObject marker = new GameObject();
         marker.name = "Object " + row + " (type " + type + ")";
         marker.transform.SetParent(mapRoot.transform);
-        marker.transform.localScale = Vector3.one * 16f;
         marker.transform.position = position;
         marker.transform.rotation = Quaternion.Euler(0, angle * Mathf.Rad2Deg, 0);
-        marker.GetComponent<Renderer>().sharedMaterial = markerMaterial;
         var item = marker.AddComponent<PbPlacedObject>();
         item.Row = row;
         item.TypeIndex = type;
         item.ImportedPosition = position;
         item.ImportedRotation = marker.transform.rotation;
         objects.Add(item);
+        AttachVisual(item);
         return item;
+    }
+
+    private void AttachVisual(PbPlacedObject item)
+    {
+        Transform previous = item.transform.Find("Visual");
+        if (previous != null)
+        {
+            previous.gameObject.SetActive(false);
+            Destroy(previous.gameObject);
+        }
+        PbVoLoader.Asset asset = item.TypeIndex >= 0 && item.TypeIndex < typeData.Count
+            ? voLoader.Load(typeData[item.TypeIndex]) : null;
+        GameObject visual;
+        if (asset == null)
+        {
+            visual = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            visual.transform.SetParent(item.transform, false);
+            visual.transform.localScale = Vector3.one * 16f;
+            visual.GetComponent<Renderer>().sharedMaterial = markerMaterial;
+        }
+        else
+        {
+            visual = new GameObject("Visual");
+            visual.transform.SetParent(item.transform, false);
+            visual.transform.localPosition = new Vector3(0f, -8f, 0f);
+            float scale = item.Row >= 0 ? storage.Float("objects", "Scale", item.Row) : 1f;
+            if (!float.IsNaN(scale) && !float.IsInfinity(scale) && scale > 0f)
+                visual.transform.localScale = Vector3.one * scale;
+            visual.AddComponent<MeshFilter>().sharedMesh = asset.Mesh;
+            visual.AddComponent<MeshRenderer>().sharedMaterials = asset.Materials;
+            var collider = visual.AddComponent<BoxCollider>();
+            collider.center = asset.Mesh.bounds.center;
+            Vector3 size = asset.Mesh.bounds.size;
+            collider.size = new Vector3(Mathf.Max(size.x, 1f),
+                                        Mathf.Max(size.y, 1f), Mathf.Max(size.z, 1f));
+        }
+        visual.name = "Visual";
+    }
+
+    private void ReloadModels()
+    {
+        if (storage == null) return;
+        Select(null);
+        voLoader = new PbVoLoader(modelRoot);
+        foreach (PbPlacedObject item in objects) AttachVisual(item);
+        message = "VO: " + voLoader.LoadedModels + " loaded / " +
+                  voLoader.MissingModels + " missing / " + voLoader.FailedModels +
+                  " failed; textures: " + voLoader.LoadedTextures;
+    }
+
+    private void ChangeType(PbPlacedObject item, int type)
+    {
+        if (item == null || item.TypeIndex == type) return;
+        Select(null);
+        item.TypeIndex = type;
+        AttachVisual(item);
+        Select(item);
     }
 
     private void AddObject()
     {
         if (storage == null || activeType < 0 || activeType >= typeNames.Count) return;
-        Vector3 center = viewCamera.transform.position;
+        Vector3 center = perspective ? cameraTarget : viewCamera.transform.position;
         center.x = Mathf.Clamp(center.x, 0, width * CellSize);
         center.z = Mathf.Clamp(center.z, 0, height * CellSize);
         center.y = 8f;
@@ -246,25 +351,56 @@ public sealed class PbStandaloneApp : MonoBehaviour
             return;
         }
         if (storage == null) return;
-        float pan = viewCamera.orthographicSize * 0.8f * Time.deltaTime;
-        Vector3 offset = Vector3.zero;
-        if (Input.GetKey(KeyCode.A) || Input.GetKey(KeyCode.LeftArrow)) offset.x -= pan;
-        if (Input.GetKey(KeyCode.D) || Input.GetKey(KeyCode.RightArrow)) offset.x += pan;
-        if (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.UpArrow)) offset.z += pan;
-        if (Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.DownArrow)) offset.z -= pan;
-        viewCamera.transform.position += offset;
+        if (Input.GetKeyDown(KeyCode.C) && GUIUtility.keyboardControl == 0)
+            ToggleCamera();
+        bool viewport = Input.mousePosition.y < Screen.height - 150 &&
+                        Input.mousePosition.x < Screen.width - 310;
+        float pan = (perspective ? cameraDistance : viewCamera.orthographicSize) *
+                    0.8f * Time.deltaTime;
+        if (Input.GetKey(KeyCode.LeftShift)) pan *= 3f;
+        float horizontal = 0f;
+        float forward = 0f;
+        if (GUIUtility.keyboardControl == 0)
+        {
+            if (Input.GetKey(KeyCode.A) || Input.GetKey(KeyCode.LeftArrow)) horizontal -= 1f;
+            if (Input.GetKey(KeyCode.D) || Input.GetKey(KeyCode.RightArrow)) horizontal += 1f;
+            if (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.UpArrow)) forward += 1f;
+            if (Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.DownArrow)) forward -= 1f;
+        }
+        if (perspective)
+        {
+            if (Input.GetMouseButton(1) && viewport)
+            {
+                cameraYaw += Input.GetAxis("Mouse X") * 4f;
+                cameraPitch = Mathf.Clamp(cameraPitch - Input.GetAxis("Mouse Y") * 4f,
+                                          10f, 85f);
+            }
+            Quaternion heading = Quaternion.Euler(0, cameraYaw, 0);
+            cameraTarget += (heading * Vector3.right * horizontal +
+                             heading * Vector3.forward * forward) * pan;
+            if (Input.GetKey(KeyCode.Q)) cameraTarget.y -= pan;
+            if (Input.GetKey(KeyCode.E)) cameraTarget.y += pan;
+        }
+        else
+            viewCamera.transform.position += new Vector3(horizontal * pan, 0, forward * pan);
         float scroll = Input.mouseScrollDelta.y;
-        if (scroll != 0 && Input.mousePosition.y < Screen.height - 125)
-            viewCamera.orthographicSize = Mathf.Clamp(viewCamera.orthographicSize *
-                Mathf.Pow(0.85f, scroll), 20f, 20000f);
-        if (Input.GetMouseButtonDown(0) && Input.mousePosition.y < Screen.height - 125 &&
-            Input.mousePosition.x < Screen.width - 310)
+        if (scroll != 0 && viewport)
+        {
+            if (perspective)
+                cameraDistance = Mathf.Clamp(cameraDistance * Mathf.Pow(0.85f, scroll),
+                                             10f, 20000f);
+            else
+                viewCamera.orthographicSize = Mathf.Clamp(viewCamera.orthographicSize *
+                    Mathf.Pow(0.85f, scroll), 20f, 20000f);
+        }
+        if (perspective) PositionPerspectiveCamera();
+        if (Input.GetMouseButtonDown(0) && viewport)
         {
             Ray ray = viewCamera.ScreenPointToRay(Input.mousePosition);
             if (terrainBrush && terrainCollider.Raycast(ray, out RaycastHit terrainHit, 10000f))
                 SculptTerrain(terrainHit.point, Input.GetKey(KeyCode.LeftShift) ? -1f : 1f);
             else if (!terrainBrush && Physics.Raycast(ray, out RaycastHit hit, 10000f))
-                Select(hit.collider.GetComponent<PbPlacedObject>());
+                Select(hit.collider.GetComponentInParent<PbPlacedObject>());
         }
         if (terrainBrush) return;
         if (selected == null) return;
@@ -278,6 +414,60 @@ public sealed class PbStandaloneApp : MonoBehaviour
         selected.transform.position += move;
         if (Input.GetKeyDown(KeyCode.Comma)) selected.transform.Rotate(0, -15f, 0);
         if (Input.GetKeyDown(KeyCode.Period)) selected.transform.Rotate(0, 15f, 0);
+    }
+
+    private void ToggleCamera()
+    {
+        perspective = !perspective;
+        if (perspective)
+        {
+            cameraTarget = new Vector3(viewCamera.transform.position.x, 0f,
+                                       viewCamera.transform.position.z);
+            cameraDistance = Mathf.Max(width, height) * CellSize * 0.9f;
+            PositionPerspectiveCamera();
+        }
+        else
+        {
+            viewCamera.orthographic = true;
+            viewCamera.transform.position = cameraTarget + Vector3.up * 5000f;
+            viewCamera.transform.rotation = Quaternion.Euler(90, 0, 0);
+        }
+    }
+
+    private void PositionPerspectiveCamera()
+    {
+        viewCamera.orthographic = false;
+        viewCamera.fieldOfView = 60f;
+        Quaternion rotation = Quaternion.Euler(cameraPitch, cameraYaw, 0);
+        viewCamera.transform.rotation = rotation;
+        viewCamera.transform.position = cameraTarget - rotation * Vector3.forward * cameraDistance;
+    }
+
+    private void CapturePreview(string path)
+    {
+        if (string.IsNullOrEmpty(path))
+            throw new ArgumentException("Set PB_EDITOR_PREVIEW_OUTPUT.");
+        var target = new RenderTexture(1280, 720, 24);
+        RenderTexture previous = RenderTexture.active;
+        try
+        {
+            viewCamera.targetTexture = target;
+            viewCamera.Render();
+            RenderTexture.active = target;
+            var image = new Texture2D(1280, 720, TextureFormat.RGB24, false);
+            image.ReadPixels(new Rect(0, 0, 1280, 720), 0, 0);
+            image.Apply();
+            File.WriteAllBytes(path, image.EncodeToPNG());
+            Destroy(image);
+            Debug.Log("PB preview captured: " + path);
+        }
+        finally
+        {
+            viewCamera.targetTexture = null;
+            RenderTexture.active = previous;
+            target.Release();
+            Destroy(target);
+        }
     }
 
     private void SculptTerrain(Vector3 point, float amount)
@@ -297,9 +487,17 @@ public sealed class PbStandaloneApp : MonoBehaviour
 
     private void Select(PbPlacedObject item)
     {
-        if (selected != null) selected.GetComponent<Renderer>().sharedMaterial = markerMaterial;
+        if (selectedRenderer != null && selectedOriginalMaterials != null)
+            selectedRenderer.sharedMaterials = selectedOriginalMaterials;
         selected = item;
-        if (selected != null) selected.GetComponent<Renderer>().sharedMaterial = selectedMaterial;
+        selectedRenderer = item == null ? null : item.GetComponentInChildren<Renderer>();
+        selectedOriginalMaterials = selectedRenderer == null ? null : selectedRenderer.sharedMaterials;
+        if (selectedRenderer != null)
+        {
+            var highlight = new Material[selectedOriginalMaterials.Length];
+            for (int i = 0; i < highlight.Length; i++) highlight[i] = selectedMaterial;
+            selectedRenderer.sharedMaterials = highlight;
+        }
     }
 
     private void SaveMap()
@@ -336,7 +534,10 @@ public sealed class PbStandaloneApp : MonoBehaviour
 
     private void OnGUI()
     {
-        GUI.Box(new Rect(0, 0, Screen.width, 125), "PB Map Editor - standalone prototype");
+        GUI.Box(new Rect(0, 0, Screen.width, 150), "PB Map Editor");
+        if (GUI.Button(new Rect(Screen.width - 200, 1, 110, 20),
+                       perspective ? "Top view (C)" : "3D view (C)"))
+            ToggleCamera();
         if (GUI.Button(new Rect(Screen.width - 85, 1, 75, 20), "Exit"))
             Application.Quit();
         GUI.Label(new Rect(10, 24, 85, 22), "Source .map:");
@@ -345,17 +546,20 @@ public sealed class PbStandaloneApp : MonoBehaviour
         GUI.Label(new Rect(10, 52, 85, 22), "Save as:");
         outputPath = GUI.TextField(new Rect(100, 51, Screen.width - 190, 23), outputPath);
         if (GUI.Button(new Rect(Screen.width - 85, 51, 75, 23), "Save")) SaveMap();
-        GUI.Label(new Rect(10, 79, Screen.width - 20, 22), message);
-        GUI.Label(new Rect(10, 101, Screen.width - 20, 20),
-            "WASD/arrows pan | wheel zoom | click cube select | IJKL move | PgUp/PgDn height | ,/. rotate"
-            + (selected == null ? "" : " | Selected row " + selected.Row + " type " + selected.TypeIndex));
+        GUI.Label(new Rect(10, 80, 85, 22), "Model root:");
+        modelRoot = GUI.TextField(new Rect(100, 79, Screen.width - 190, 23), modelRoot);
+        if (GUI.Button(new Rect(Screen.width - 85, 79, 75, 23), "Reload")) ReloadModels();
+        GUI.Label(new Rect(10, 106, Screen.width - 20, 22), message);
+        GUI.Label(new Rect(10, 128, Screen.width - 20, 20), perspective
+            ? "3D: right drag orbit | WASD pan | Q/E height | wheel zoom | C top | click model select"
+            : "Top: WASD/arrows pan | wheel zoom | C 3D | click model select | IJKL move | PgUp/PgDn height | ,/. rotate");
         DrawCatalog();
     }
 
     private void DrawCatalog()
     {
         float left = Screen.width - 310;
-        float top = 130;
+        float top = 155;
         float panelHeight = Screen.height - top;
         GUI.Box(new Rect(left, top, 310, panelHeight), "Object catalog");
         GUI.Label(new Rect(left + 10, top + 25, 55, 22), "Search:");
@@ -393,7 +597,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
             if (GUI.Button(new Rect(0, row * 25, 270, 24), i + ": " + typeNames[i]))
             {
                 activeType = i;
-                if (selected != null) selected.TypeIndex = i;
+                if (selected != null) ChangeType(selected, i);
             }
             row++;
         }

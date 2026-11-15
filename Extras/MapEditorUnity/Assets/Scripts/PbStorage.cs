@@ -174,6 +174,17 @@ public sealed class PbStorage
 
     public byte[] Bytes() => (byte[])data.Clone();
 
+    public byte[] RawArray(string table, string name, int kind, int arrayIndex = 0)
+    {
+        Column column = GetColumn(table, name, kind);
+        if (arrayIndex < 0 || arrayIndex >= column.Arrays.Count)
+            throw new InvalidDataException("Missing array " + table + "/" + name);
+        ArrayInfo array = column.Arrays[arrayIndex];
+        var result = new byte[checked(array.Count * column.ElementSize)];
+        Buffer.BlockCopy(data, array.Offset, result, 0, result.Length);
+        return result;
+    }
+
     // Rebuild one CDataBuf, copying every other column and table byte for byte.
     // Each array keeps its current contents unless a replacement is supplied.
     public PbStorage ReplaceArray(string table, string name, int kind,

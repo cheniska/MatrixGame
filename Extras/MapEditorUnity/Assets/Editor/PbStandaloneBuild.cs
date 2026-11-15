@@ -24,6 +24,7 @@ public static class PbStandaloneBuild
         CreateMaterial("PBMarker", new Color(0.85f, 0.30f, 0.16f));
         CreateMaterial("PBSelected", Color.yellow);
         CreateMaterial("PBTerrain", new Color(0.36f, 0.49f, 0.34f));
+        CreateMaterial("PBModel", Color.white);
         AssetDatabase.SaveAssets();
         const string scenePath = "Assets/Generated/PBStandalone.unity";
         EditorSceneManager.SaveScene(scene, scenePath);
