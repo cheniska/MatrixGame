@@ -130,7 +130,16 @@ public sealed class PbMapOverlays
                 triangles[t++] = p + 1; triangles[t++] = p + stride + 1;
                 triangles[t++] = p + stride;
             }
-        AddMesh("Top tile " + row, vertices, uv, triangles, material);
+        GameObject tile = AddMesh("Top tile " + row, vertices, uv, triangles, material);
+        var identity = tile.AddComponent<PbMapTile>();
+        identity.Row = row;
+        identity.X = x;
+        identity.Y = y;
+        identity.Flags = flags;
+        identity.Descriptor = storage.String("toptextures", "Name", row);
+        identity.CellsX = cellsX;
+        identity.CellsY = cellsY;
+        tile.AddComponent<MeshCollider>().sharedMesh = tile.GetComponent<MeshFilter>().sharedMesh;
     }
 
     private void BuildSurface(int row, string descriptor, Material baseMaterial)
@@ -178,7 +187,7 @@ public sealed class PbMapOverlays
         AddMesh("Surface " + row, vertices, uv, triangles, material);
     }
 
-    private void AddMesh(string name, Vector3[] vertices, Vector2[] uv,
+    private GameObject AddMesh(string name, Vector3[] vertices, Vector2[] uv,
                          int[] triangles, Material material)
     {
         var mesh = new Mesh { name = name };
@@ -190,6 +199,7 @@ public sealed class PbMapOverlays
         visual.transform.SetParent(parent, false);
         visual.AddComponent<MeshFilter>().sharedMesh = mesh;
         visual.AddComponent<MeshRenderer>().sharedMaterial = material;
+        return visual;
     }
 
     private Vector3 World(float cellX, float cellY, float raise) =>
@@ -214,4 +224,15 @@ public sealed class PbMapOverlays
         return uv;
     }
 
+}
+
+public sealed class PbMapTile : MonoBehaviour
+{
+    public int Row;
+    public int X;
+    public int Y;
+    public int Flags;
+    public int CellsX;
+    public int CellsY;
+    public string Descriptor;
 }

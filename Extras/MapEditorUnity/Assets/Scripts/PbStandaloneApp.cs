@@ -28,8 +28,10 @@ public sealed class PbStandaloneApp : MonoBehaviour
     private Vector2 catalogScroll;
     private Vector2 entityScroll;
     private Vector2 playerScroll;
+    private Vector2 tileScroll;
     private string typeSearch = "";
     private string brushSearch = "";
+    private string tileSearch = "";
     private int panelTab;
     private bool brushTypeCatalog;
     private int playerSide;
@@ -47,6 +49,9 @@ public sealed class PbStandaloneApp : MonoBehaviour
     private int terrainTextureCount;
     private int entityCount;
     private PbMapEntity selectedEntity;
+    private readonly List<PbMapTile> tileRows = new List<PbMapTile>();
+    private readonly HashSet<PbMapTile> selectedTiles = new HashSet<PbMapTile>();
+    private PbMapTile primaryTile;
     private readonly HashSet<int> editedTerrain = new HashSet<int>();
     private bool terrainBrush;
     private bool perspective;
@@ -97,7 +102,8 @@ public sealed class PbStandaloneApp : MonoBehaviour
             mapPath = Path.GetFullPath(Path.Combine(Application.dataPath, "../Maps/Training.map"));
         if (File.Exists(mapPath)) LoadMap();
         string smokeMode = Environment.GetEnvironmentVariable("PB_EDITOR_SMOKE");
-        if (smokeMode == "preview" || smokeMode == "preview_target")
+        if (smokeMode == "preview" || smokeMode == "preview_target" ||
+            smokeMode == "preview_tile")
         {
             if (storage == null || voLoader.LoadedModels < 1)
             {
@@ -105,7 +111,17 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 Application.Quit(1);
                 return;
             }
-            if (smokeMode == "preview_target")
+            if (smokeMode == "preview_tile")
+            {
+                PbMapTile tile = tileRows[0];
+                SelectTile(tile, false);
+                Vector3 center = tile.GetComponent<MeshFilter>().sharedMesh.bounds.center;
+                viewCamera.orthographic = true;
+                viewCamera.orthographicSize = 120f;
+                viewCamera.transform.position = center + Vector3.up * 400f;
+                viewCamera.transform.rotation = Quaternion.Euler(90f, 0f, 0f);
+            }
+            else if (smokeMode == "preview_target")
             {
                 PbPlacedObject target = objects.Find(item => item.TypeIndex >= 0 &&
                     item.TypeIndex < typeData.Count &&
@@ -176,15 +192,29 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 Transform tile = overlayRoot.transform.Find("Top tile 0");
                 Mesh tileMesh = tile == null ? null : tile.GetComponent<MeshFilter>().sharedMesh;
                 Material tileMaterial = tile == null ? null : tile.GetComponent<MeshRenderer>().sharedMaterial;
+                PbMapTile tileIdentity = tile == null ? null : tile.GetComponent<PbMapTile>();
+                MeshCollider tileCollider = tile == null ? null : tile.GetComponent<MeshCollider>();
                 Texture2D tileTexture = voLoader.LoadTexture(
                     storage.String("toptextures", "Name", 0));
                 if (tileMesh == null || tileMaterial == null ||
+                    tileIdentity == null || tileIdentity.Row != 0 || tileCollider == null ||
                     tileMaterial.shader.name != "PB/Overlay" ||
                     tileTexture == null || tileTexture.width <= 0 ||
                     tileMaterial.mainTextureScale.y != 1f ||
                     Mathf.Abs(tileMesh.bounds.size.x -
                         tileTexture.width / 64f * CellSize) > 0.01f)
                     throw new InvalidOperationException("Overlay scale or alpha shader is invalid.");
+                Ray tileRay = new Ray(tileMesh.bounds.center + Vector3.up * 1000f,
+                                      Vector3.down);
+                if (!tileCollider.Raycast(tileRay, out RaycastHit tileHit, 2000f))
+                    throw new InvalidOperationException("Top tile cannot be picked.");
+                SelectTile(tileIdentity, false);
+                if (primaryTile != tileIdentity || selectedTiles.Count != 1 ||
+                    !tile.GetComponent<LineRenderer>().enabled)
+                    throw new InvalidOperationException("Top tile selection failed.");
+                SelectTile(tileIdentity, true);
+                if (selectedTiles.Count != 0)
+                    throw new InvalidOperationException("Top tile deselection failed.");
                 for (int row = 0; row < overlayTiles; row++)
                 {
                     Transform top = overlayRoot.transform.Find("Top tile " + row);
@@ -303,6 +333,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 if (parsed.Count("objects", name, 3) != count)
                     throw new InvalidDataException("Object columns have different lengths.");
 
+            ClearTileSelection();
             if (mapRoot != null) Destroy(mapRoot);
             objects.Clear();
             entityRoots.Clear();
@@ -654,6 +685,8 @@ public sealed class PbStandaloneApp : MonoBehaviour
 
     private void BuildOverlays()
     {
+        ClearTileSelection();
+        tileRows.Clear();
         if (overlayRoot != null)
         {
             overlayRoot.SetActive(false);
@@ -667,6 +700,8 @@ public sealed class PbStandaloneApp : MonoBehaviour
         overlayTiles = overlays.Tiles;
         overlaySurfaces = overlays.Surfaces;
         overlayMissing = overlays.Missing;
+        tileRows.AddRange(overlayRoot.GetComponentsInChildren<PbMapTile>());
+        tileRows.Sort((a, b) => a.Row.CompareTo(b.Row));
     }
 
     private void AttachCaptureRing(GameObject building, int side)
@@ -920,7 +955,23 @@ public sealed class PbStandaloneApp : MonoBehaviour
         if (Input.GetMouseButtonDown(0) && viewport)
         {
             Ray ray = viewCamera.ScreenPointToRay(Input.mousePosition);
-            if (terrainBrush && terrainCollider.Raycast(ray, out RaycastHit terrainHit, 10000f))
+            if (panelTab == 3)
+            {
+                PbMapTile nearest = null;
+                float distance = float.PositiveInfinity;
+                foreach (RaycastHit tileHit in Physics.RaycastAll(ray, 10000f))
+                {
+                    PbMapTile tile = tileHit.collider.GetComponent<PbMapTile>();
+                    if (tile != null && tileHit.distance < distance)
+                    {
+                        nearest = tile;
+                        distance = tileHit.distance;
+                    }
+                }
+                SelectTile(nearest, Input.GetKey(KeyCode.LeftShift) ||
+                                    Input.GetKey(KeyCode.RightShift));
+            }
+            else if (terrainBrush && terrainCollider.Raycast(ray, out RaycastHit terrainHit, 10000f))
                 SculptTerrain(terrainHit.point, Input.GetKey(KeyCode.LeftShift) ? -1f : 1f);
             else if (!terrainBrush && Physics.Raycast(ray, out RaycastHit hit, 10000f))
             {
@@ -1060,6 +1111,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
 
     private void Select(PbPlacedObject item)
     {
+        ClearTileSelection();
         ClearHighlight();
         selected = item;
         selectedEntity = null;
@@ -1068,11 +1120,80 @@ public sealed class PbStandaloneApp : MonoBehaviour
 
     private void SelectEntity(PbMapEntity entity)
     {
+        ClearTileSelection();
         ClearHighlight();
         selected = null;
         selectedEntity = entity;
         if (entity != null) Highlight(entity.gameObject);
     }
+
+    private void SelectTile(PbMapTile tile, bool additive)
+    {
+        ClearHighlight();
+        selected = null;
+        selectedEntity = null;
+        if (!additive) ClearTileSelection();
+        if (tile == null) return;
+        if (selectedTiles.Remove(tile))
+        {
+            LineRenderer old = tile.GetComponent<LineRenderer>();
+            if (old != null) old.enabled = false;
+            primaryTile = null;
+            foreach (PbMapTile remaining in selectedTiles) primaryTile = remaining;
+        }
+        else
+        {
+            selectedTiles.Add(tile);
+            primaryTile = tile;
+            ShowTileOutline(tile);
+        }
+        message = selectedTiles.Count + " tile(s) selected. Shift+click adds/removes; Copy IDs sends rows to clipboard.";
+    }
+
+    private void ClearTileSelection()
+    {
+        foreach (PbMapTile tile in selectedTiles)
+        {
+            if (tile == null) continue;
+            LineRenderer line = tile.GetComponent<LineRenderer>();
+            if (line != null) line.enabled = false;
+        }
+        selectedTiles.Clear();
+        primaryTile = null;
+    }
+
+    private void ShowTileOutline(PbMapTile tile)
+    {
+        LineRenderer line = tile.GetComponent<LineRenderer>();
+        if (line == null)
+        {
+            line = tile.gameObject.AddComponent<LineRenderer>();
+            line.sharedMaterial = selectedMaterial;
+            line.startColor = Color.yellow;
+            line.endColor = Color.yellow;
+            line.widthMultiplier = 2f;
+            line.loop = true;
+            line.useWorldSpace = false;
+            Vector3[] vertices = tile.GetComponent<MeshFilter>().sharedMesh.vertices;
+            int stride = tile.CellsX + 1;
+            line.positionCount = 2 * (tile.CellsX + tile.CellsY);
+            int index = 0;
+            for (int u = 0; u <= tile.CellsX; u++)
+                line.SetPosition(index++, vertices[u] + Vector3.up * 2f);
+            for (int v = 1; v <= tile.CellsY; v++)
+                line.SetPosition(index++, vertices[v * stride + tile.CellsX] + Vector3.up * 2f);
+            for (int u = tile.CellsX - 1; u >= 0; u--)
+                line.SetPosition(index++, vertices[tile.CellsY * stride + u] + Vector3.up * 2f);
+            for (int v = tile.CellsY - 1; v > 0; v--)
+                line.SetPosition(index++, vertices[v * stride] + Vector3.up * 2f);
+        }
+        line.enabled = true;
+    }
+
+    private string TileRecord(PbMapTile tile) =>
+        Path.GetFileName(mapPath) + " | toptextures row " + tile.Row +
+        " | X=" + tile.X + " Y=" + tile.Y + " Flags=" + tile.Flags +
+        " | " + tile.Descriptor;
 
     private void Highlight(GameObject root)
     {
@@ -1201,8 +1322,8 @@ public sealed class PbStandaloneApp : MonoBehaviour
         if (GUI.Button(new Rect(Screen.width - 85, 79, 75, 23), "Reload")) ReloadModels();
         GUI.Label(new Rect(10, 106, Screen.width - 20, 22), message);
         GUI.Label(new Rect(10, 128, Screen.width - 20, 20), perspective
-            ? "3D: right drag orbit | WASD pan | Q/E height | wheel zoom | C top | click model select"
-            : "Top: WASD/arrows pan | wheel zoom | C 3D | click model select | IJKL move | PgUp/PgDn height | ,/. rotate");
+            ? "3D: right drag orbit | WASD pan | Q/E height | wheel zoom | C top | Tiles tab: click to select"
+            : "Top: WASD/arrows pan | wheel zoom | C 3D | Tiles tab: click tile, Shift+click adds more");
         DrawSidebar();
     }
 
@@ -1212,9 +1333,9 @@ public sealed class PbStandaloneApp : MonoBehaviour
         float top = 155;
         float panelHeight = Screen.height - top;
         GUI.Box(new Rect(left, top, 310, panelHeight), "Map tools");
-        string[] tabs = { "Brushes", "Entities", "Players" };
+        string[] tabs = { "Brushes", "Entities", "Players", "Tiles" };
         for (int i = 0; i < tabs.Length; i++)
-            if (GUI.Button(new Rect(left + 10 + i * 97, top + 24, 96, 26), tabs[i]))
+            if (GUI.Button(new Rect(left + 10 + i * 73, top + 24, 72, 26), tabs[i]))
             {
                 if (panelTab != i) Select(null);
                 panelTab = i;
@@ -1222,7 +1343,72 @@ public sealed class PbStandaloneApp : MonoBehaviour
             }
         if (panelTab == 0) DrawBrushPanel(left, top + 55);
         else if (panelTab == 1) DrawEntityPanel(left, top + 55);
-        else DrawPlayersPanel(left, top + 55);
+        else if (panelTab == 2) DrawPlayersPanel(left, top + 55);
+        else DrawTilePanel(left, top + 55);
+    }
+
+    private void DrawTilePanel(float left, float top)
+    {
+        GUI.Label(new Rect(left + 10, top, 290, 22),
+                  "Selected " + selectedTiles.Count + " / " + tileRows.Count + " top tiles");
+        if (primaryTile != null)
+        {
+            GUI.Label(new Rect(left + 10, top + 25, 290, 22),
+                      "Row " + primaryTile.Row + " | Flags " + primaryTile.Flags +
+                      " | X " + primaryTile.X + " Y " + primaryTile.Y);
+            GUI.Label(new Rect(left + 10, top + 49, 290, 32), primaryTile.Descriptor);
+        }
+        else GUI.Label(new Rect(left + 10, top + 25, 290, 45),
+                       "Click a tile on the map or select a row below.");
+        if (GUI.Button(new Rect(left + 10, top + 82, 94, 25), "Copy IDs"))
+        {
+            var chosen = new List<PbMapTile>(selectedTiles);
+            chosen.Sort((a, b) => a.Row.CompareTo(b.Row));
+            var lines = new List<string>();
+            foreach (PbMapTile tile in chosen) lines.Add(TileRecord(tile));
+            GUIUtility.systemCopyBuffer = string.Join(Environment.NewLine, lines.ToArray());
+            message = "Copied " + chosen.Count + " tile ID(s) to clipboard.";
+        }
+        if (GUI.Button(new Rect(left + 107, top + 82, 94, 25), "Focus") && primaryTile != null)
+        {
+            Vector3 center = primaryTile.GetComponent<MeshFilter>().sharedMesh.bounds.center;
+            if (perspective)
+            {
+                cameraTarget = center;
+                PositionPerspectiveCamera();
+            }
+            else viewCamera.transform.position = new Vector3(center.x,
+                viewCamera.transform.position.y, center.z);
+        }
+        if (GUI.Button(new Rect(left + 204, top + 82, 96, 25), "Clear"))
+            ClearTileSelection();
+        GUI.Label(new Rect(left + 10, top + 115, 60, 22), "Search:");
+        tileSearch = GUI.TextField(new Rect(left + 70, top + 115, 230, 22), tileSearch);
+        float listTop = top + 143;
+        float listHeight = Mathf.Max(0, Screen.height - listTop - 10);
+        int visible = 0;
+        foreach (PbMapTile tile in tileRows)
+            if (TileRecord(tile).IndexOf(tileSearch, StringComparison.OrdinalIgnoreCase) >= 0)
+                visible++;
+        tileScroll = GUI.BeginScrollView(new Rect(left + 10, listTop, 290, listHeight),
+                                         tileScroll, new Rect(0, 0, 270, visible * 26));
+        int row = 0;
+        foreach (PbMapTile tile in tileRows)
+        {
+            if (TileRecord(tile).IndexOf(tileSearch, StringComparison.OrdinalIgnoreCase) < 0)
+                continue;
+            float y = row * 26;
+            if (y + 26 >= tileScroll.y && y <= tileScroll.y + listHeight)
+            {
+                string name = tile.Descriptor.Split('?')[0].Replace('\\', '/');
+                string label = tile.Row + " | F" + tile.Flags + " | " +
+                    Path.GetFileName(name);
+                if (GUI.Button(new Rect(0, y, 270, 25), label))
+                    SelectTile(tile, Event.current.shift);
+            }
+            row++;
+        }
+        GUI.EndScrollView();
     }
 
     private void DrawBrushPanel(float left, float top)
