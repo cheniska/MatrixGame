@@ -64,6 +64,7 @@ add_subdirectory(MatrixLib)
 add_subdirectory(MatrixLib/DebugMsg)
 add_subdirectory(MatrixLib/FilePNG)
 add_subdirectory(ThirdParty/ZLib)
+add_subdirectory(Extras/RobotsDat)
 
 # target_link_libraries(MatrixGame 3G Base Bitmap)
 target_link_libraries(MatrixGame MatrixLib)

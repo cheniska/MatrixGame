@@ -1,0 +1,5 @@
+add_executable(robots_dat_tool RobotsDat.cpp)
+target_include_directories(robots_dat_tool PRIVATE ../../MatrixLib/Base/include)
+target_link_libraries(robots_dat_tool PRIVATE MatrixLib ZLIB)
+target_compile_options(robots_dat_tool PRIVATE ${COMPILE_OPTIONS})
+target_compile_definitions(robots_dat_tool PRIVATE ${COMPILE_DEFINITIONS})
