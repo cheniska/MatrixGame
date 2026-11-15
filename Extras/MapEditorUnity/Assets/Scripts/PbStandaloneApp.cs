@@ -23,10 +23,17 @@ public sealed class PbStandaloneApp : MonoBehaviour
     private readonly List<string> typeData = new List<string>();
     private PbVoLoader voLoader;
     private PbPlacedObject selected;
-    private Renderer selectedRenderer;
-    private Material[] selectedOriginalMaterials;
+    private readonly Dictionary<Renderer, Material[]> highlighted =
+        new Dictionary<Renderer, Material[]>();
     private Vector2 catalogScroll;
+    private Vector2 entityScroll;
+    private Vector2 playerScroll;
     private string typeSearch = "";
+    private string brushSearch = "";
+    private int panelTab;
+    private bool brushTypeCatalog;
+    private int playerSide;
+    private PbPlayers players;
     private int activeType;
     private Material markerMaterial;
     private Material selectedMaterial;
@@ -86,7 +93,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
             mapPath = Path.GetFullPath(Path.Combine(Application.dataPath, "../Maps/Training.map"));
         if (File.Exists(mapPath)) LoadMap();
         string smokeMode = Environment.GetEnvironmentVariable("PB_EDITOR_SMOKE");
-        if (smokeMode == "preview")
+        if (smokeMode == "preview" || smokeMode == "preview_target")
         {
             if (storage == null || voLoader.LoadedModels < 1)
             {
@@ -94,13 +101,27 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 Application.Quit(1);
                 return;
             }
-            ToggleCamera();
+            if (smokeMode == "preview_target")
+            {
+                PbPlacedObject target = objects.Find(item => item.TypeIndex >= 0 &&
+                    item.TypeIndex < typeData.Count &&
+                    typeData[item.TypeIndex].IndexOf("robotarget.vo",
+                        StringComparison.OrdinalIgnoreCase) >= 0);
+                if (target == null) throw new InvalidOperationException("Target model is absent.");
+                viewCamera.orthographic = false;
+                viewCamera.fieldOfView = 40f;
+                viewCamera.transform.position = target.transform.position +
+                    new Vector3(35f, 25f, 70f);
+                viewCamera.transform.LookAt(target.transform.position + Vector3.up * 16f);
+            }
+            else ToggleCamera();
             CapturePreview(Environment.GetEnvironmentVariable("PB_EDITOR_PREVIEW_OUTPUT"));
             Application.Quit();
         }
         if (smokeMode == "1" || smokeMode == "add" || smokeMode == "delete" ||
             smokeMode == "terrain" || smokeMode == "models" || smokeMode == "camera" ||
-            smokeMode == "entities" || smokeMode == "textures" || smokeMode == "mirror")
+            smokeMode == "entities" || smokeMode == "textures" ||
+            smokeMode == "mirror" || smokeMode == "players")
         {
             if (storage == null)
             {
@@ -121,6 +142,22 @@ public sealed class PbStandaloneApp : MonoBehaviour
             if (smokeMode == "textures" &&
                 terrainTextureCount != storage.Count("textures", "Name", 5))
                 throw new InvalidOperationException("Smoke test terrain palette is incomplete.");
+            if (smokeMode == "textures")
+            {
+                PbVoLoader.Asset target = voLoader.Load("Matrix/Obj/plant/robotarget.vo");
+                PbVoLoader.Asset basis = voLoader.Load("Matrix/Cannon/Basis.vo");
+                if (target == null || target.Materials[0].mainTexture == null ||
+                    target.Materials[0].mainTextureScale.y != -1f ||
+                    basis == null || basis.Materials[0].mainTexture == null ||
+                    voLoader.MissingTextures != 0 || voLoader.LoadedTextures < 50)
+                    throw new InvalidOperationException("VO textures or DDS orientation are incomplete.");
+            }
+            if (smokeMode == "players")
+            {
+                players.Resources[0, 0] = "2501";
+                players.Ai[1, 3] = "0.75";
+                players.Maintenance = "125";
+            }
             if (smokeMode == "entities")
             {
                 foreach (string table in new[] { "buildings", "cannons", "robots" })
@@ -172,6 +209,14 @@ public sealed class PbStandaloneApp : MonoBehaviour
             if (smokeMode == "mirror" &&
                 check.Int("objects", "X", 0) != storage.Int("objects", "X", 0) - 1)
                 throw new InvalidOperationException("Mirrored object position was saved incorrectly.");
+            if (smokeMode == "players")
+            {
+                Dictionary<string, string> props = check.Properties();
+                if (!props["SideResInfo"].Contains("1,2501,") ||
+                    !props["SideAIInfo"].Contains("Red:TBB/60000/SK/1/DK/1/WRK/1/BK/0.75/TC/3") ||
+                    props["MaintenanceTime"] != "125")
+                    throw new InvalidOperationException("Player settings were not saved.");
+            }
             Debug.Log("PB standalone smoke succeeded: " + outputPath);
             Application.Quit();
         }
@@ -211,11 +256,11 @@ public sealed class PbStandaloneApp : MonoBehaviour
             typeData.Clear();
             editedTerrain.Clear();
             terrainBrush = false;
+            ClearHighlight();
             selected = null;
             selectedEntity = null;
-            selectedRenderer = null;
-            selectedOriginalMaterials = null;
             storage = parsed;
+            players = new PbPlayers(parsed);
             width = newWidth;
             height = newHeight;
             sourceHash = Hash(bytes);
@@ -355,7 +400,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
         foreach (GameObject old in entityRoots)
             if (old != null) { old.SetActive(false); Destroy(old); }
         entityRoots.Clear();
-        selectedEntity = null;
+        Select(null);
         entityCount = 0;
         int buildings = storage.Count("buildings", "X", 0);
         for (int row = 0; row < buildings; row++)
@@ -763,9 +808,10 @@ public sealed class PbStandaloneApp : MonoBehaviour
             else if (!terrainBrush && Physics.Raycast(ray, out RaycastHit hit, 10000f))
             {
                 PbPlacedObject objectHit = hit.collider.GetComponentInParent<PbPlacedObject>();
-                Select(objectHit);
-                selectedEntity = objectHit == null
-                    ? hit.collider.GetComponentInParent<PbMapEntity>() : null;
+                PbMapEntity entityHit = hit.collider.GetComponentInParent<PbMapEntity>();
+                if (panelTab == 0 && objectHit != null) Select(objectHit);
+                else if (panelTab == 1 && entityHit != null) SelectEntity(entityHit);
+                else if (panelTab != 2) Select(null);
             }
         }
         if (terrainBrush) return;
@@ -896,18 +942,37 @@ public sealed class PbStandaloneApp : MonoBehaviour
 
     private void Select(PbPlacedObject item)
     {
-        if (selectedRenderer != null && selectedOriginalMaterials != null)
-            selectedRenderer.sharedMaterials = selectedOriginalMaterials;
+        ClearHighlight();
         selected = item;
-        if (item != null) selectedEntity = null;
-        selectedRenderer = item == null ? null : item.GetComponentInChildren<Renderer>();
-        selectedOriginalMaterials = selectedRenderer == null ? null : selectedRenderer.sharedMaterials;
-        if (selectedRenderer != null)
+        selectedEntity = null;
+        if (item != null) Highlight(item.gameObject);
+    }
+
+    private void SelectEntity(PbMapEntity entity)
+    {
+        ClearHighlight();
+        selected = null;
+        selectedEntity = entity;
+        if (entity != null) Highlight(entity.gameObject);
+    }
+
+    private void Highlight(GameObject root)
+    {
+        foreach (Renderer renderer in root.GetComponentsInChildren<Renderer>())
         {
-            var highlight = new Material[selectedOriginalMaterials.Length];
-            for (int i = 0; i < highlight.Length; i++) highlight[i] = selectedMaterial;
-            selectedRenderer.sharedMaterials = highlight;
+            Material[] originals = renderer.sharedMaterials;
+            highlighted[renderer] = originals;
+            var overlay = new Material[originals.Length];
+            for (int i = 0; i < overlay.Length; i++) overlay[i] = selectedMaterial;
+            renderer.sharedMaterials = overlay;
         }
+    }
+
+    private void ClearHighlight()
+    {
+        foreach (KeyValuePair<Renderer, Material[]> entry in highlighted)
+            if (entry.Key != null) entry.Key.sharedMaterials = entry.Value;
+        highlighted.Clear();
     }
 
     private void SaveMap()
@@ -920,6 +985,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 throw new IOException("Source map changed. Load it again.");
             PbStorage edited = PbObjectWriter.Save(storage, objects, CellSize, width, out int changed);
             int changedEntities = SaveEntityPositions(edited);
+            edited = players.Save(edited);
             if (editedTerrain.Count > 0)
             {
                 Vector3[] vertices = terrainMesh.vertices;
@@ -1019,58 +1085,150 @@ public sealed class PbStandaloneApp : MonoBehaviour
         GUI.Label(new Rect(10, 128, Screen.width - 20, 20), perspective
             ? "3D: right drag orbit | WASD pan | Q/E height | wheel zoom | C top | click model select"
             : "Top: WASD/arrows pan | wheel zoom | C 3D | click model select | IJKL move | PgUp/PgDn height | ,/. rotate");
-        DrawCatalog();
+        DrawSidebar();
     }
 
-    private void DrawCatalog()
+    private void DrawSidebar()
     {
         float left = Screen.width - 310;
         float top = 155;
         float panelHeight = Screen.height - top;
-        GUI.Box(new Rect(left, top, 310, panelHeight), "Object catalog");
-        GUI.Label(new Rect(left + 10, top + 25, 55, 22), "Search:");
-        typeSearch = GUI.TextField(new Rect(left + 65, top + 25, 235, 22), typeSearch);
+        GUI.Box(new Rect(left, top, 310, panelHeight), "Map tools");
+        string[] tabs = { "Brushes", "Entities", "Players" };
+        for (int i = 0; i < tabs.Length; i++)
+            if (GUI.Button(new Rect(left + 10 + i * 97, top + 24, 96, 26), tabs[i]))
+            {
+                if (panelTab != i) Select(null);
+                panelTab = i;
+                terrainBrush = false;
+            }
+        if (panelTab == 0) DrawBrushPanel(left, top + 55);
+        else if (panelTab == 1) DrawEntityPanel(left, top + 55);
+        else DrawPlayersPanel(left, top + 55);
+    }
+
+    private void DrawBrushPanel(float left, float top)
+    {
+        if (GUI.Button(new Rect(left + 10, top, 140, 25), "Placed brushes"))
+            brushTypeCatalog = false;
+        if (GUI.Button(new Rect(left + 160, top, 140, 25), "Object types"))
+            brushTypeCatalog = true;
+        if (GUI.Button(new Rect(left + 10, top + 30, 290, 25),
+                       terrainBrush ? "Height brush ON (Shift lowers)" : "Height brush OFF"))
+            terrainBrush = !terrainBrush;
         if (selected != null)
         {
             string name = selected.TypeIndex >= 0 && selected.TypeIndex < typeNames.Count
                 ? typeNames[selected.TypeIndex] : "unknown";
-            GUI.Label(new Rect(left + 10, top + 53, 290, 22),
-                      "Selected: " + selected.Row + " / " + name);
-            if (GUI.Button(new Rect(left + 160, top + 78, 140, 25), "Delete selected"))
+            GUI.Label(new Rect(left + 10, top + 61, 290, 22),
+                      "Selected brush " + selected.Row + ": " + name);
+            if (GUI.Button(new Rect(left + 160, top + 87, 140, 25), "Delete selected"))
                 DeleteSelected();
         }
-        else if (selectedEntity != null)
-            GUI.Label(new Rect(left + 10, top + 53, 290, 22),
-                      selectedEntity.Table + " row " + selectedEntity.Row +
-                      " kind " + selectedEntity.Kind + " side " + selectedEntity.Side);
-        if (GUI.Button(new Rect(left + 10, top + 78, 140, 25), "Add at center"))
+        if (GUI.Button(new Rect(left + 10, top + 87, 140, 25), "Add at center"))
             AddObject();
-        if (GUI.Button(new Rect(left + 10, top + 107, 290, 25),
-                       terrainBrush ? "Terrain brush ON (Shift lowers)" : "Terrain brush OFF"))
-            terrainBrush = !terrainBrush;
-        GUI.Label(new Rect(left + 10, top + 137, 290, 22),
-                  "Type " + activeType + " / " + typeNames.Count +
-                  " | Objects " + objects.Count);
-        float listTop = top + 162;
+        GUI.Label(new Rect(left + 10, top + 118, 60, 22), "Search:");
+        if (brushTypeCatalog)
+            typeSearch = GUI.TextField(new Rect(left + 70, top + 118, 230, 22), typeSearch);
+        else
+            brushSearch = GUI.TextField(new Rect(left + 70, top + 118, 230, 22), brushSearch);
+        float listTop = top + 145;
         float listHeight = Mathf.Max(0, Screen.height - listTop - 10);
         int visible = 0;
-        for (int i = 0; i < typeNames.Count; i++)
-            if (typeNames[i].IndexOf(typeSearch, StringComparison.OrdinalIgnoreCase) >= 0)
-                visible++;
+        if (brushTypeCatalog)
+            for (int i = 0; i < typeNames.Count; i++)
+                if (typeNames[i].IndexOf(typeSearch, StringComparison.OrdinalIgnoreCase) >= 0)
+                    visible++;
+        else
+            foreach (PbPlacedObject item in objects)
+                if ((item.Row + " " + BrushName(item)).IndexOf(
+                    brushSearch, StringComparison.OrdinalIgnoreCase) >= 0) visible++;
         catalogScroll = GUI.BeginScrollView(new Rect(left + 10, listTop, 290, listHeight),
                                             catalogScroll, new Rect(0, 0, 270, visible * 25));
         int row = 0;
-        for (int i = 0; i < typeNames.Count; i++)
+        if (brushTypeCatalog)
         {
-            if (typeNames[i].IndexOf(typeSearch, StringComparison.OrdinalIgnoreCase) < 0)
-                continue;
-            if (GUI.Button(new Rect(0, row * 25, 270, 24), i + ": " + typeNames[i]))
+            for (int i = 0; i < typeNames.Count; i++)
             {
-                activeType = i;
-                if (selected != null) ChangeType(selected, i);
+                if (typeNames[i].IndexOf(typeSearch, StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+                if (GUI.Button(new Rect(0, row * 25, 270, 24), i + ": " + typeNames[i]))
+                {
+                    activeType = i;
+                    if (selected != null) ChangeType(selected, i);
+                }
+                row++;
             }
+        }
+        else foreach (PbPlacedObject item in objects)
+        {
+            string label = item.Row + ": " + BrushName(item);
+            if (label.IndexOf(brushSearch, StringComparison.OrdinalIgnoreCase) < 0) continue;
+            float y = row * 25;
+            if (y + 25 >= catalogScroll.y && y <= catalogScroll.y + listHeight &&
+                GUI.Button(new Rect(0, y, 270, 24), label)) Select(item);
             row++;
         }
+        GUI.EndScrollView();
+    }
+
+    private string BrushName(PbPlacedObject item) =>
+        item.TypeIndex >= 0 && item.TypeIndex < typeNames.Count
+            ? typeNames[item.TypeIndex] : "unknown type " + item.TypeIndex;
+
+    private void DrawEntityPanel(float left, float top)
+    {
+        GUI.Label(new Rect(left + 10, top, 290, 22),
+                  selectedEntity == null ? "Select a model or a row below"
+                  : selectedEntity.Table + " " + selectedEntity.Row +
+                    " | kind " + selectedEntity.Kind + " | side " + selectedEntity.Side);
+        GUI.Label(new Rect(left + 10, top + 26, 290, 40),
+                  "IJKL move | ,/. rotate | PgUp/PgDn cannon height");
+        if (voLoader != null && voLoader.MissingModelPaths.Count > 0)
+            GUI.Label(new Rect(left + 10, top + 61, 290, 22),
+                      "Missing model: " + Path.GetFileName(voLoader.MissingModelPaths[0]));
+        float listTop = top + 88;
+        float listHeight = Mathf.Max(0, Screen.height - listTop - 10);
+        entityScroll = GUI.BeginScrollView(new Rect(left + 10, listTop, 290, listHeight),
+                                           entityScroll,
+                                           new Rect(0, 0, 270, entityRoots.Count * 26));
+        for (int i = 0; i < entityRoots.Count; i++)
+        {
+            PbMapEntity entity = entityRoots[i].GetComponent<PbMapEntity>();
+            string label = entity.Table + " " + entity.Row + " | kind " + entity.Kind +
+                           " | side " + entity.Side;
+            if (GUI.Button(new Rect(0, i * 26, 270, 25), label)) SelectEntity(entity);
+        }
+        GUI.EndScrollView();
+    }
+
+    private void DrawPlayersPanel(float left, float top)
+    {
+        if (players == null) return;
+        for (int i = 0; i < 4; i++)
+            if (GUI.Button(new Rect(left + 10 + i * 73, top, 72, 24), PbPlayers.Sides[i]))
+                playerSide = i;
+        float listTop = top + 30;
+        float listHeight = Mathf.Max(0, Screen.height - listTop - 10);
+        playerScroll = GUI.BeginScrollView(new Rect(left + 10, listTop, 290, listHeight),
+                                           playerScroll, new Rect(0, 0, 270, 450));
+        GUI.Label(new Rect(0, 0, 270, 23), "Starting resources — " + PbPlayers.Sides[playerSide]);
+        for (int i = 0; i < 5; i++)
+        {
+            GUI.Label(new Rect(0, 25 + i * 26, 150, 24), PbPlayers.ResourceLabels[i]);
+            players.Resources[playerSide, i] = GUI.TextField(new Rect(152, 25 + i * 26, 115, 24),
+                                                              players.Resources[playerSide, i]);
+        }
+        GUI.Label(new Rect(0, 158, 270, 23), "AI settings");
+        for (int i = 0; i < 6; i++)
+        {
+            GUI.Label(new Rect(0, 183 + i * 26, 150, 24), PbPlayers.AiLabels[i]);
+            players.Ai[playerSide, i] = GUI.TextField(new Rect(152, 183 + i * 26, 115, 24),
+                                                       players.Ai[playerSide, i]);
+        }
+        GUI.Label(new Rect(0, 351, 150, 24), "Reinforcements %");
+        players.Maintenance = GUI.TextField(new Rect(152, 351, 115, 24), players.Maintenance);
+        GUI.Label(new Rect(0, 385, 270, 46), "Use Save as to write player settings\nto a new .map file.");
         GUI.EndScrollView();
     }
 }

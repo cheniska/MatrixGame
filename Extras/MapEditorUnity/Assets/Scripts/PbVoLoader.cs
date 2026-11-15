@@ -29,8 +29,10 @@ public sealed class PbVoLoader
         new Dictionary<string, Texture2D>(StringComparer.OrdinalIgnoreCase);
     public int LoadedModels { get; private set; }
     public int MissingModels { get; private set; }
+    public readonly List<string> MissingModelPaths = new List<string>();
     public int FailedModels { get; private set; }
     public int LoadedTextures { get; private set; }
+    public int MissingTextures { get; private set; }
 
     public PbVoLoader(string resourceRoot)
     {
@@ -49,6 +51,7 @@ public sealed class PbVoLoader
             if (!File.Exists(path))
             {
                 MissingModels++;
+                MissingModelPaths.Add(relative.Replace('\\', '/'));
                 Debug.LogWarning("VO preview missing: " + path);
             }
             else
@@ -158,6 +161,11 @@ public sealed class PbVoLoader
         {
             string name = vo.String("surfs", "texs", i);
             Texture2D texture = FindTexture(path, name, mapTexture);
+            if (texture == null)
+            {
+                MissingTextures++;
+                Debug.LogWarning("VO texture missing: " + path + " surface " + i + " -> " + name);
+            }
             Material baseMaterial = Resources.Load<Material>("PBModel");
             Material material = baseMaterial != null
                 ? new Material(baseMaterial)
@@ -165,6 +173,13 @@ public sealed class PbVoLoader
             material.name = mesh.name + " surface " + i;
             material.color = texture == null ? new Color(0.72f, 0.72f, 0.68f) : Color.white;
             material.mainTexture = texture;
+            // Raw DDS rows keep DirectX's top-down layout. Unity's PNG decoder
+            // already handles image orientation, so only DDS needs this correction.
+            if (texture != null && texture.name.EndsWith(".dds", StringComparison.OrdinalIgnoreCase))
+            {
+                material.mainTextureScale = new Vector2(1f, -1f);
+                material.mainTextureOffset = new Vector2(0f, 1f);
+            }
             materials[i] = material;
         }
         var attachments = new Dictionary<int, Matrix4x4>();
@@ -213,14 +228,18 @@ public sealed class PbVoLoader
         }
         if (!string.IsNullOrEmpty(voName))
         {
-            try { candidates.Add(Resolve(voName)); }
+            string normalized = voName.Replace('\\', '/');
+            int matrix = normalized.IndexOf("Matrix/", StringComparison.OrdinalIgnoreCase);
+            if (matrix >= 0) normalized = normalized.Substring(matrix);
+            try { candidates.Add(Resolve(normalized)); }
             catch (InvalidDataException) { }
         }
+        candidates.Add(Path.Combine(Path.GetDirectoryName(modelPath),
+                                    Path.GetFileNameWithoutExtension(modelPath)));
         foreach (string candidate in candidates)
             foreach (string extension in new[] { ".dds", ".png" })
             {
-                string path = candidate.EndsWith(extension, StringComparison.OrdinalIgnoreCase)
-                    ? candidate : candidate + extension;
+                string path = Path.ChangeExtension(candidate, extension);
                 if (!File.Exists(path)) continue;
                 if (textures.TryGetValue(path, out Texture2D cached)) return cached;
                 try
@@ -263,6 +282,7 @@ public sealed class PbVoLoader
         TextureFormat format;
         int blockSize;
         if (fourcc == "DXT1") { format = TextureFormat.DXT1; blockSize = 8; }
+        else if (fourcc == "DXT3") { format = TextureFormat.RGBA32; blockSize = 16; }
         else if (fourcc == "DXT5") { format = TextureFormat.DXT5; blockSize = 16; }
         else return null;
         if (width < 1 || height < 1 || width > 8192 || height > 8192)
@@ -270,14 +290,64 @@ public sealed class PbVoLoader
         int dataSize = checked(((width + 3) / 4) * ((height + 3) / 4) * blockSize);
         if (128L + dataSize > bytes.Length)
             throw new InvalidDataException("Truncated DDS texture.");
-        var payload = new byte[dataSize];
-        Buffer.BlockCopy(bytes, 128, payload, 0, dataSize);
+        byte[] payload;
+        if (fourcc == "DXT3") payload = DecodeDxt3(bytes, width, height);
+        else
+        {
+            payload = new byte[dataSize];
+            Buffer.BlockCopy(bytes, 128, payload, 0, dataSize);
+        }
         var texture = new Texture2D(width, height, format, false);
         texture.LoadRawTextureData(payload);
         texture.Apply(false, true);
         texture.name = Path.GetFileName(path);
         return texture;
     }
+
+    private static byte[] DecodeDxt3(byte[] source, int width, int height)
+    {
+        var rgba = new byte[checked(width * height * 4)];
+        int blocksX = (width + 3) / 4;
+        int blocksY = (height + 3) / 4;
+        for (int by = 0; by < blocksY; by++)
+            for (int bx = 0; bx < blocksX; bx++)
+            {
+                int at = 128 + (by * blocksX + bx) * 16;
+                int c0 = U16(source, at + 8);
+                int c1 = U16(source, at + 10);
+                uint indices = BitConverter.ToUInt32(source, at + 12);
+                var colors = new Color32[4];
+                colors[0] = Rgb565(c0);
+                colors[1] = Rgb565(c1);
+                colors[2] = Blend(colors[0], colors[1], 2, 1);
+                colors[3] = Blend(colors[0], colors[1], 1, 2);
+                for (int y = 0; y < 4; y++)
+                    for (int x = 0; x < 4; x++)
+                    {
+                        int px = bx * 4 + x, py = by * 4 + y;
+                        if (px >= width || py >= height) continue;
+                        int pixel = y * 4 + x;
+                        Color32 color = colors[(int)((indices >> (2 * pixel)) & 3)];
+                        int output = (py * width + px) * 4;
+                        rgba[output] = color.r;
+                        rgba[output + 1] = color.g;
+                        rgba[output + 2] = color.b;
+                        rgba[output + 3] = (byte)(((source[at + pixel / 2] >>
+                            ((pixel & 1) * 4)) & 15) * 17);
+                    }
+            }
+        return rgba;
+    }
+
+    private static Color32 Rgb565(int value) => new Color32(
+        (byte)(((value >> 11) & 31) * 255 / 31),
+        (byte)(((value >> 5) & 63) * 255 / 63),
+        (byte)((value & 31) * 255 / 31), 255);
+
+    private static Color32 Blend(Color32 a, Color32 b, int aw, int bw) => new Color32(
+        (byte)((a.r * aw + b.r * bw) / 3),
+        (byte)((a.g * aw + b.g * bw) / 3),
+        (byte)((a.b * aw + b.b * bw) / 3), 255);
 
     private static string Parameter(string descriptor, string key)
     {
