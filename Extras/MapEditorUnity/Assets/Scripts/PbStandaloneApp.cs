@@ -1,5 +1,7 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
 using UnityEngine;
@@ -10,6 +12,30 @@ public sealed class PbStandaloneApp : MonoBehaviour
     private const float CellSize = 20f;
     private const float MoveStep = 20f;
     private const float WaterLevel = -2f;
+    private const float ToolsWidth = 330f;
+    private const float StatusHeight = 28f;
+    private bool showPaths;
+    private float HeaderHeight => showPaths ? 183f : 88f;
+    private GUIStyle titleStyle;
+    private GUIStyle mutedStyle;
+    private GUIStyle tabStyle;
+    private GUIStyle activeTabStyle;
+    private GUIStyle axisLabelStyle;
+    private int transformTool; // 0 select, 1 move, 2 rotate, 3 uniform scale
+    private int gizmoAxis = -1;
+    private Vector2 gizmoLastMouse;
+    private float gizmoTurnAccumulated;
+    private string objectXText = "";
+    private string objectYText = "";
+    private string objectHText = "";
+    private string angleZText = "";
+    private string angleXText = "";
+    private string angleYText = "";
+    private string objectScaleText = "";
+    private Texture2D chromeTexture;
+    private Texture2D panelTexture;
+    private Texture2D accentTexture;
+    private Texture2D fieldTexture;
     private string mapPath = "";
     private string outputPath = "";
     private string modelRoot = "";
@@ -106,6 +132,20 @@ public sealed class PbStandaloneApp : MonoBehaviour
             mapPath = Path.GetFullPath(Path.Combine(Application.dataPath, "../Maps/Training.map"));
         if (File.Exists(mapPath)) LoadMap();
         string smokeMode = Environment.GetEnvironmentVariable("PB_EDITOR_SMOKE");
+        if (smokeMode == "ui_preview")
+        {
+            if (storage == null) throw new InvalidOperationException("UI preview map is absent.");
+            PbPlacedObject target = objects.Find(item => item.Row == 739) ?? objects[0];
+            Select(target);
+            transformTool = 1;
+            viewCamera.orthographic = true;
+            viewCamera.orthographicSize = 180f;
+            viewCamera.transform.position = target.transform.position + Vector3.up * 500f;
+            viewCamera.transform.rotation = Quaternion.Euler(90f, 0f, 0f);
+            StartCoroutine(CaptureUiPreview(
+                Environment.GetEnvironmentVariable("PB_EDITOR_PREVIEW_OUTPUT")));
+            return;
+        }
         if (smokeMode == "preview" || smokeMode == "preview_target" ||
             smokeMode == "preview_tile" || smokeMode == "preview_surface")
         {
@@ -314,6 +354,10 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 PbPlacedObject item = objects.Find(o => o.GetComponentInChildren<BoxCollider>() != null);
                 if (item == null) throw new InvalidOperationException("No object pick collider.");
                 item.Rotate(15f, 10f, -10f);
+                item.SetScale(item.Scale * 1.1f);
+                Select(item);
+                objectHText = Number(item.transform.position.y - 7f);
+                ApplyObjectInspector();
                 BoxCollider pick = item.GetComponentInChildren<BoxCollider>();
                 Ray ray = new Ray(pick.bounds.center + Vector3.up *
                     (pick.bounds.extents.y + 10f), Vector3.down);
@@ -380,6 +424,11 @@ public sealed class PbStandaloneApp : MonoBehaviour
                     check.Float("objects", "AngleY", item.Row));
                 if (Quaternion.Angle(saved, item.transform.rotation) > 0.1f)
                     throw new InvalidOperationException("Three-axis rotation did not round-trip.");
+                if (Mathf.Abs(check.Float("objects", "Scale", item.Row) - item.Scale) > 0.0001f)
+                    throw new InvalidOperationException("Object scale did not round-trip.");
+                if (Mathf.Abs(check.Float("objects", "Height", item.Row) -
+                    storage.Float("objects", "Height", item.Row) - 1f) > 0.001f)
+                    throw new InvalidOperationException("Numeric transform inspector did not save height.");
                 GameObject baseRoot = entityRoots.Find(root =>
                     root.GetComponent<PbMapEntity>().Table == "buildings" &&
                     root.GetComponent<PbMapEntity>().Kind == 0);
@@ -524,6 +573,8 @@ public sealed class PbStandaloneApp : MonoBehaviour
         item.AngleZ = angle;
         item.AngleX = angleX;
         item.AngleY = angleY;
+        item.Scale = row >= 0 ? storage.Float("objects", "Scale", row) : 1f;
+        item.ImportedScale = item.Scale;
         item.ImportedPosition = position;
         item.ImportedRotation = marker.transform.rotation;
         objects.Add(item);
@@ -554,7 +605,7 @@ public sealed class PbStandaloneApp : MonoBehaviour
             visual = new GameObject("Visual");
             visual.transform.SetParent(item.transform, false);
             visual.transform.localPosition = new Vector3(0f, -8f, 0f);
-            float scale = item.Row >= 0 ? storage.Float("objects", "Scale", item.Row) : 1f;
+            float scale = item.Scale;
             if (!float.IsNaN(scale) && !float.IsInfinity(scale) && scale > 0f)
                 visual.transform.localScale = Vector3.one * scale;
             visual.AddComponent<MeshFilter>().sharedMesh = asset.Mesh;
@@ -1092,8 +1143,9 @@ public sealed class PbStandaloneApp : MonoBehaviour
         if (storage == null) return;
         if (Input.GetKeyDown(KeyCode.C) && GUIUtility.keyboardControl == 0)
             ToggleCamera();
-        bool viewport = Input.mousePosition.y < Screen.height - 150 &&
-                        Input.mousePosition.x < Screen.width - 310;
+        bool viewport = Input.mousePosition.y < Screen.height - HeaderHeight &&
+                        Input.mousePosition.y > StatusHeight &&
+                        Input.mousePosition.x < Screen.width - ToolsWidth;
         float pan = (perspective ? cameraDistance : viewCamera.orthographicSize) *
                     0.8f * Time.deltaTime;
         if (Input.GetKey(KeyCode.LeftShift)) pan *= 3f;
@@ -1135,8 +1187,13 @@ public sealed class PbStandaloneApp : MonoBehaviour
         if (perspective) PositionPerspectiveCamera();
         if (Input.GetMouseButtonDown(0) && viewport)
         {
+            GUIUtility.keyboardControl = 0;
+        }
+        if (HandleGizmoInput(viewport)) return;
+        if (Input.GetMouseButtonDown(0) && viewport)
+        {
             Ray ray = viewCamera.ScreenPointToRay(Input.mousePosition);
-            if (panelTab == 3)
+            if (panelTab == 4)
             {
                 RaycastHit[] hits = Physics.RaycastAll(ray, 10000f);
                 Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
@@ -1170,33 +1227,57 @@ public sealed class PbStandaloneApp : MonoBehaviour
                 PbPlacedObject objectHit = hit.collider.GetComponentInParent<PbPlacedObject>();
                 PbMapEntity entityHit = hit.collider.GetComponentInParent<PbMapEntity>();
                 if (panelTab == 0 && objectHit != null) Select(objectHit);
-                else if (panelTab == 1 && entityHit != null) SelectEntity(entityHit);
-                else if (panelTab != 2) Select(null);
+                else if (panelTab == 2 && entityHit != null) SelectEntity(entityHit);
+                else if (panelTab != 3) Select(null);
             }
         }
         if (terrainBrush) return;
         if (selected == null && selectedEntity == null) return;
+        if (GUIUtility.keyboardControl != 0) return;
         Vector3 move = Vector3.zero;
-        if (Input.GetKeyDown(KeyCode.J)) move.x -= MoveStep;
-        if (Input.GetKeyDown(KeyCode.L)) move.x += MoveStep;
-        if (Input.GetKeyDown(KeyCode.I)) move.z += MoveStep;
-        if (Input.GetKeyDown(KeyCode.K)) move.z -= MoveStep;
+        if (transformTool == 1)
+        {
+            if (Input.GetKeyDown(KeyCode.J)) move.x -= MoveStep;
+            if (Input.GetKeyDown(KeyCode.L)) move.x += MoveStep;
+            if (Input.GetKeyDown(KeyCode.I)) move.z += MoveStep;
+            if (Input.GetKeyDown(KeyCode.K)) move.z -= MoveStep;
+        }
         if (selected != null)
         {
-            if (Input.GetKeyDown(KeyCode.PageUp)) move.y += 1f;
-            if (Input.GetKeyDown(KeyCode.PageDown)) move.y -= 1f;
+            Vector3 oldPosition = selected.transform.position;
+            Quaternion oldRotation = selected.transform.rotation;
+            float oldScale = selected.Scale;
+            if (transformTool == 1)
+            {
+                if (Input.GetKeyDown(KeyCode.PageUp)) move.y += 1f;
+                if (Input.GetKeyDown(KeyCode.PageDown)) move.y -= 1f;
+            }
             selected.transform.position += move;
-            if (Input.GetKeyDown(KeyCode.Comma)) selected.Rotate(-15f, 0f, 0f);
-            if (Input.GetKeyDown(KeyCode.Period)) selected.Rotate(15f, 0f, 0f);
-            if (Input.GetKeyDown(KeyCode.U)) selected.Rotate(0f, 15f, 0f);
-            if (Input.GetKeyDown(KeyCode.O)) selected.Rotate(0f, -15f, 0f);
-            if (Input.GetKeyDown(KeyCode.N)) selected.Rotate(0f, 0f, -15f);
-            if (Input.GetKeyDown(KeyCode.M)) selected.Rotate(0f, 0f, 15f);
+            if (transformTool == 2)
+            {
+                if (Input.GetKeyDown(KeyCode.Comma)) selected.Rotate(-15f, 0f, 0f);
+                if (Input.GetKeyDown(KeyCode.Period)) selected.Rotate(15f, 0f, 0f);
+                if (Input.GetKeyDown(KeyCode.U)) selected.Rotate(0f, 15f, 0f);
+                if (Input.GetKeyDown(KeyCode.O)) selected.Rotate(0f, -15f, 0f);
+                if (Input.GetKeyDown(KeyCode.N)) selected.Rotate(0f, 0f, -15f);
+                if (Input.GetKeyDown(KeyCode.M)) selected.Rotate(0f, 0f, 15f);
+            }
+            if (transformTool == 3)
+            {
+                if (Input.GetKeyDown(KeyCode.Equals) || Input.GetKeyDown(KeyCode.KeypadPlus))
+                    selected.SetScale(selected.Scale * 1.1f);
+                if (Input.GetKeyDown(KeyCode.Minus) || Input.GetKeyDown(KeyCode.KeypadMinus))
+                    selected.SetScale(selected.Scale / 1.1f);
+            }
+            if (oldPosition != selected.transform.position ||
+                Quaternion.Angle(oldRotation, selected.transform.rotation) > 0.001f ||
+                Mathf.Abs(oldScale - selected.Scale) > 0.0001f)
+                SyncObjectInspector(selected);
         }
         else
         {
             selectedEntity.transform.position += move;
-            if (selectedEntity.Table == "cannons")
+            if (transformTool == 1 && selectedEntity.Table == "cannons")
             {
                 if (Input.GetKeyDown(KeyCode.PageUp)) selectedEntity.ExtraHeight += 1f;
                 if (Input.GetKeyDown(KeyCode.PageDown)) selectedEntity.ExtraHeight -= 1f;
@@ -1207,12 +1288,132 @@ public sealed class PbStandaloneApp : MonoBehaviour
             p.y = SampleTerrainHeight(x, y) + selectedEntity.ExtraHeight;
             selectedEntity.transform.position = p;
             float turn = selectedEntity.Table == "buildings" ? 90f : 15f;
-            if (selectedEntity.Table != "robots")
+            if (transformTool == 2 && selectedEntity.Table != "robots")
             {
                 if (Input.GetKeyDown(KeyCode.Comma)) selectedEntity.transform.Rotate(0, -turn, 0);
                 if (Input.GetKeyDown(KeyCode.Period)) selectedEntity.transform.Rotate(0, turn, 0);
             }
         }
+    }
+
+    private Vector3 GizmoCenter => selected != null ? selected.transform.position :
+        selectedEntity != null ? selectedEntity.transform.position : Vector3.zero;
+
+    private Vector2 GizmoScreen(Vector3 position)
+    {
+        Vector3 screen = viewCamera.WorldToScreenPoint(position);
+        return new Vector2(screen.x, Screen.height - screen.y);
+    }
+
+    private float GizmoLength(Vector3 center) => Mathf.Clamp(
+        (perspective ? Vector3.Distance(viewCamera.transform.position, center) :
+            viewCamera.orthographicSize) * 0.16f, 8f, 400f);
+
+    private Vector2 GizmoEndpoint(int axis)
+    {
+        Vector3 center = GizmoCenter;
+        Vector2 origin = GizmoScreen(center);
+        if (transformTool == 3) return origin + new Vector2(48f, -48f);
+        Vector3 direction = axis == 0 ? Vector3.right : axis == 1 ? Vector3.up : Vector3.forward;
+        Vector2 endpoint = GizmoScreen(center + direction * GizmoLength(center));
+        if (Vector2.Distance(origin, endpoint) < 22f)
+            endpoint = origin + (axis == 0 ? new Vector2(58f, 0f) :
+                axis == 1 ? new Vector2(-42f, -42f) : new Vector2(-42f, 42f));
+        return endpoint;
+    }
+
+    private bool GizmoAxisAllowed(int axis)
+    {
+        if (selected != null) return true;
+        if (selectedEntity == null || transformTool == 3) return false;
+        if (transformTool == 1) return axis != 1 || selectedEntity.Table == "cannons";
+        return axis == 1 && selectedEntity.Table != "robots";
+    }
+
+    private bool HandleGizmoInput(bool viewport)
+    {
+        if (gizmoAxis >= 0 && Input.GetMouseButtonUp(0))
+        {
+            gizmoAxis = -1;
+            gizmoTurnAccumulated = 0f;
+            return true;
+        }
+        if (gizmoAxis >= 0 && Input.GetMouseButton(0))
+        {
+            Vector2 mouse = new Vector2(Input.mousePosition.x,
+                                        Screen.height - Input.mousePosition.y);
+            Vector2 delta = mouse - gizmoLastMouse;
+            gizmoLastMouse = mouse;
+            if (transformTool == 3 && selected != null)
+                selected.SetScale(selected.Scale * Mathf.Exp(-delta.y * 0.012f));
+            else
+            {
+                Vector2 screenAxis = GizmoEndpoint(gizmoAxis) - GizmoScreen(GizmoCenter);
+                float pixels = Vector2.Dot(delta, screenAxis.normalized);
+                if (Input.GetKey(KeyCode.LeftShift)) pixels *= 0.2f;
+                if (transformTool == 1)
+                {
+                    float amount = pixels * GizmoLength(GizmoCenter) /
+                        Mathf.Max(22f, screenAxis.magnitude);
+                    Vector3 axis = gizmoAxis == 0 ? Vector3.right :
+                        gizmoAxis == 1 ? Vector3.up : Vector3.forward;
+                    if (selected != null) selected.transform.position += axis * amount;
+                    else if (selectedEntity != null)
+                    {
+                        selectedEntity.transform.position += axis * amount;
+                        if (gizmoAxis == 1) selectedEntity.ExtraHeight += amount;
+                        else
+                        {
+                            Vector3 p = selectedEntity.transform.position;
+                            p.y = SampleTerrainHeight(CellX(p.x), p.z / CellSize) +
+                                  selectedEntity.ExtraHeight;
+                            selectedEntity.transform.position = p;
+                        }
+                    }
+                }
+                else if (transformTool == 2)
+                {
+                    float degrees = pixels * 0.55f;
+                    if (selected != null)
+                    {
+                        if (gizmoAxis == 0) selected.Rotate(0f, -degrees, 0f);
+                        else if (gizmoAxis == 1) selected.Rotate(degrees, 0f, 0f);
+                        else selected.Rotate(0f, 0f, degrees);
+                    }
+                    else if (selectedEntity != null)
+                    {
+                        if (selectedEntity.Table == "buildings")
+                        {
+                            gizmoTurnAccumulated += degrees;
+                            if (Mathf.Abs(gizmoTurnAccumulated) >= 45f)
+                            {
+                                float turn = Mathf.Sign(gizmoTurnAccumulated) * 90f;
+                                selectedEntity.transform.Rotate(0f, turn, 0f);
+                                gizmoTurnAccumulated -= turn;
+                            }
+                        }
+                        else selectedEntity.transform.Rotate(0f, degrees, 0f);
+                    }
+                }
+            }
+            if (selected != null) SyncObjectInspector(selected);
+            return true;
+        }
+        if (!viewport || transformTool == 0 ||
+            (selected == null && selectedEntity == null) || !Input.GetMouseButtonDown(0))
+            return false;
+        Vector2 pointer = new Vector2(Input.mousePosition.x,
+                                      Screen.height - Input.mousePosition.y);
+        for (int axis = 0; axis < (transformTool == 3 ? 1 : 3); axis++)
+            if (GizmoAxisAllowed(axis) &&
+                Vector2.Distance(pointer, GizmoEndpoint(axis)) < 16f)
+            {
+                gizmoAxis = axis;
+                gizmoLastMouse = pointer;
+                gizmoTurnAccumulated = 0f;
+                return true;
+            }
+        return false;
     }
 
     private void ToggleCamera()
@@ -1269,6 +1470,18 @@ public sealed class PbStandaloneApp : MonoBehaviour
         }
     }
 
+    private IEnumerator CaptureUiPreview(string path)
+    {
+        if (string.IsNullOrEmpty(path))
+            throw new ArgumentException("Set PB_EDITOR_PREVIEW_OUTPUT.");
+        yield return new WaitForEndOfFrame();
+        yield return new WaitForEndOfFrame();
+        ScreenCapture.CaptureScreenshot(path);
+        yield return new WaitForSeconds(1f);
+        Debug.Log("PB UI preview captured: " + path);
+        Application.Quit();
+    }
+
     private void SculptTerrain(Vector3 point, float amount)
     {
         int x = Mathf.Clamp(Mathf.RoundToInt(CellX(point.x)), 0, width);
@@ -1323,7 +1536,72 @@ public sealed class PbStandaloneApp : MonoBehaviour
         ClearHighlight();
         selected = item;
         selectedEntity = null;
+        if (item != null)
+        {
+            SyncObjectInspector(item);
+            if (!brushTypeCatalog)
+            {
+                int filteredRow = 0;
+                foreach (PbPlacedObject listed in objects)
+                {
+                    if ((listed.Row + " " + BrushName(listed)).IndexOf(
+                        brushSearch, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    if (listed == item) { catalogScroll.y = Mathf.Max(0, filteredRow * 28 - 50); break; }
+                    filteredRow++;
+                }
+            }
+        }
         if (item != null) Highlight(item.gameObject);
+    }
+
+    private static string Number(float value) =>
+        value.ToString("0.###", CultureInfo.InvariantCulture);
+
+    private void SyncObjectInspector(PbPlacedObject item)
+    {
+        Vector3 p = item.transform.position;
+        objectXText = Number(CellX(p.x));
+        objectYText = Number(p.z / CellSize);
+        objectHText = Number(p.y - 8f);
+        angleZText = Number(item.AngleZ * Mathf.Rad2Deg);
+        angleXText = Number(item.AngleX * Mathf.Rad2Deg);
+        angleYText = Number(item.AngleY * Mathf.Rad2Deg);
+        objectScaleText = Number(item.Scale);
+    }
+
+    private static bool ParseNumber(string text, out float value) =>
+        float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value) ||
+        float.TryParse(text, NumberStyles.Float, CultureInfo.CurrentCulture, out value);
+
+    private void ApplyObjectInspector()
+    {
+        if (selected == null) return;
+        if (!ParseNumber(objectXText, out float x) ||
+            !ParseNumber(objectYText, out float y) ||
+            !ParseNumber(objectHText, out float h) ||
+            !ParseNumber(angleZText, out float z) ||
+            !ParseNumber(angleXText, out float ax) ||
+            !ParseNumber(angleYText, out float ay) ||
+            !ParseNumber(objectScaleText, out float scale) ||
+            float.IsNaN(x) || float.IsNaN(y) || float.IsNaN(h) ||
+            float.IsNaN(z) || float.IsNaN(ax) || float.IsNaN(ay) ||
+            float.IsNaN(scale) || float.IsInfinity(x) || float.IsInfinity(y) ||
+            float.IsInfinity(h) || float.IsInfinity(z) || float.IsInfinity(ax) ||
+            float.IsInfinity(ay) || float.IsInfinity(scale) || scale <= 0f)
+        {
+            message = "Invalid transform number or scale.";
+            return;
+        }
+        selected.transform.position = new Vector3(MapX(x), h + 8f, y * CellSize);
+        selected.AngleZ = z * Mathf.Deg2Rad;
+        selected.AngleX = ax * Mathf.Deg2Rad;
+        selected.AngleY = ay * Mathf.Deg2Rad;
+        selected.transform.rotation = PbPlacedObject.Rotation(selected.AngleZ,
+            selected.AngleX, selected.AngleY);
+        selected.SetScale(scale);
+        SyncObjectInspector(selected);
+        GUIUtility.keyboardControl = 0;
+        message = "Object " + selected.Row + " transform updated. Save copy to write the map.";
     }
 
     private void SelectEntity(PbMapEntity entity)
@@ -1520,48 +1798,196 @@ public sealed class PbStandaloneApp : MonoBehaviour
 
     private void OnGUI()
     {
-        GUI.Box(new Rect(0, 0, Screen.width, 150), "PB Map Editor");
-        if (GUI.Button(new Rect(Screen.width - 200, 1, 110, 20),
-                       perspective ? "Top view (C)" : "3D view (C)"))
+        EnsureSkin();
+        GUI.DrawTexture(new Rect(0, 0, Screen.width, HeaderHeight), chromeTexture);
+        GUI.Label(new Rect(18, 10, 190, 30), "PB MAP EDITOR", titleStyle);
+        string fileName = string.IsNullOrEmpty(mapPath) ? "No map" : Path.GetFileName(mapPath);
+        string[] modes = { "Select", "Move", "Rotate", "Scale" };
+        for (int i = 0; i < modes.Length; i++)
+        {
+            bool enabled = i != 3 || panelTab == 0;
+            GUI.enabled = enabled;
+            if (GUI.Button(new Rect(205 + i * 67, 10, 65, 30), modes[i],
+                           transformTool == i ? activeTabStyle : tabStyle))
+            {
+                transformTool = i;
+                gizmoAxis = -1;
+            }
+        }
+        GUI.enabled = true;
+        GUI.Label(new Rect(485, 11, Mathf.Max(50, Screen.width - 875), 26),
+                  fileName + (storage == null ? "" : "  |  " + width + " x " + height),
+                  mutedStyle);
+        float actions = Screen.width - 382;
+        if (GUI.Button(new Rect(actions, 10, 88, 30), showPaths ? "Hide paths" : "Files"))
+            showPaths = !showPaths;
+        if (GUI.Button(new Rect(actions + 94, 10, 104, 30), "Save copy")) SaveMap();
+        if (GUI.Button(new Rect(actions + 204, 10, 94, 30),
+                       perspective ? "Top (C)" : "3D (C)"))
             ToggleCamera();
-        if (GUI.Button(new Rect(Screen.width - 85, 1, 75, 20), "Exit"))
+        if (GUI.Button(new Rect(actions + 304, 10, 68, 30), "Exit"))
             Application.Quit();
-        GUI.Label(new Rect(10, 24, 85, 22), "Source .map:");
-        mapPath = GUI.TextField(new Rect(100, 23, Screen.width - 190, 23), mapPath);
-        if (GUI.Button(new Rect(Screen.width - 85, 23, 75, 23), "Load")) LoadMap();
-        GUI.Label(new Rect(10, 52, 85, 22), "Save as:");
-        outputPath = GUI.TextField(new Rect(100, 51, Screen.width - 190, 23), outputPath);
-        if (GUI.Button(new Rect(Screen.width - 85, 51, 75, 23), "Save")) SaveMap();
-        GUI.Label(new Rect(10, 80, 85, 22), "Model root:");
-        modelRoot = GUI.TextField(new Rect(100, 79, Screen.width - 190, 23), modelRoot);
-        if (GUI.Button(new Rect(Screen.width - 85, 79, 75, 23), "Reload")) ReloadModels();
-        GUI.Label(new Rect(10, 106, Screen.width - 20, 22), message);
-        GUI.Label(new Rect(10, 128, Screen.width - 20, 20), selected != null
-            ? "Brush: IJKL move X/Z | PgUp/PgDn move Y | ,/. yaw | U/O tilt X | N/M tilt Y"
-            : perspective
-                ? "3D: right drag orbit | WASD pan | Q/E height | wheel zoom | C top | Decals tab: click to select"
-                : "Top: WASD/arrows pan | wheel zoom | C 3D | Decals tab: click decal, Shift+click adds more");
+        if (showPaths)
+        {
+            GUI.Label(new Rect(18, 55, 92, 24), "OPEN MAP", mutedStyle);
+            mapPath = GUI.TextField(new Rect(116, 53, Screen.width - 220, 26), mapPath);
+            if (GUI.Button(new Rect(Screen.width - 94, 53, 76, 26), "Load")) LoadMap();
+            GUI.Label(new Rect(18, 87, 92, 24), "SAVE AS", mutedStyle);
+            outputPath = GUI.TextField(new Rect(116, 85, Screen.width - 220, 26), outputPath);
+            if (GUI.Button(new Rect(Screen.width - 94, 85, 76, 26), "Save")) SaveMap();
+            GUI.Label(new Rect(18, 119, 92, 24), "MODELS", mutedStyle);
+            modelRoot = GUI.TextField(new Rect(116, 117, Screen.width - 220, 26), modelRoot);
+            if (GUI.Button(new Rect(Screen.width - 94, 117, 76, 26), "Reload")) ReloadModels();
+        }
+        string hint = panelTab == 0 ?
+            transformTool == 0 ? "SELECT  ·  Click a model or a row in the object list" :
+            transformTool == 1 ? "MOVE  ·  Gizmo uses Unity X/Y/Z (map Y = Z)  ·  IJKL  ·  PgUp/Dn height  ·  Shift = fine" :
+            transformTool == 2 ? "ROTATE  ·  Drag Unity X/Y/Z handles  ·  ,/. U/O N/M rotate  ·  Shift = fine" :
+            "SCALE  ·  Drag S handle  ·  +/- changes uniform scale  ·  Shift = fine"
+            : panelTab == 1 ? "TERRAIN  ·  Enable height brush  ·  Click to raise  ·  Shift+click to lower"
+            : panelTab == 2 ? "ENTITIES  ·  Select model or list row  ·  IJKL move  ·  ,/. rotate"
+            : panelTab == 3 ? "PLAYERS  ·  Select a side and edit values  ·  Save copy to write changes"
+            : "DECALS  ·  Click to select  ·  Shift+click to add/remove  ·  Click again to cycle";
+        GUI.Label(new Rect(18, HeaderHeight - 31, Screen.width - 36, 22), hint, mutedStyle);
         DrawSidebar();
+        DrawGizmo();
+        GUI.DrawTexture(new Rect(0, Screen.height - StatusHeight, Screen.width, StatusHeight),
+                        chromeTexture);
+        GUI.Label(new Rect(14, Screen.height - StatusHeight + 4,
+                           Screen.width - 28, 22), message, mutedStyle);
+    }
+
+    private static void DrawGizmoLine(Vector2 start, Vector2 end, Color color)
+    {
+        Vector2 delta = end - start;
+        Matrix4x4 old = GUI.matrix;
+        Color oldColor = GUI.color;
+        GUI.color = color;
+        GUIUtility.RotateAroundPivot(Mathf.Atan2(delta.y, delta.x) * Mathf.Rad2Deg, start);
+        GUI.DrawTexture(new Rect(start.x, start.y - 2f, delta.magnitude, 4f),
+                        Texture2D.whiteTexture);
+        GUI.matrix = old;
+        GUI.color = oldColor;
+    }
+
+    private void DrawGizmo()
+    {
+        if (transformTool == 0 || (selected == null && selectedEntity == null)) return;
+        Vector3 projected = viewCamera.WorldToScreenPoint(GizmoCenter);
+        if (projected.z <= 0f) return;
+        Vector2 center = GizmoScreen(GizmoCenter);
+        int count = transformTool == 3 ? 1 : 3;
+        for (int axis = 0; axis < count; axis++)
+        {
+            if (!GizmoAxisAllowed(axis)) continue;
+            Vector2 end = GizmoEndpoint(axis);
+            Color color = transformTool == 3 ? new Color(0.35f, 0.85f, 0.92f) :
+                axis == 0 ? new Color(0.95f, 0.38f, 0.36f) :
+                axis == 1 ? new Color(0.48f, 0.88f, 0.49f) :
+                new Color(0.43f, 0.64f, 1f);
+            DrawGizmoLine(center, end, color);
+            Color oldColor = GUI.color;
+            GUI.color = color;
+            GUI.DrawTexture(new Rect(end.x - 11f, end.y - 11f, 22f, 22f),
+                            Texture2D.whiteTexture);
+            GUI.color = oldColor;
+            GUI.Label(new Rect(end.x - 11f, end.y - 11f, 22f, 22f),
+                      transformTool == 3 ? "S" : axis == 0 ? "X" : axis == 1 ? "Y" : "Z",
+                      axisLabelStyle);
+        }
+    }
+
+    private static Texture2D SolidTexture(Color color)
+    {
+        var texture = new Texture2D(1, 1, TextureFormat.RGBA32, false);
+        texture.SetPixel(0, 0, color);
+        texture.Apply();
+        return texture;
+    }
+
+    private void EnsureSkin()
+    {
+        if (titleStyle == null)
+        {
+            chromeTexture = SolidTexture(new Color(0.105f, 0.13f, 0.17f));
+            panelTexture = SolidTexture(new Color(0.14f, 0.17f, 0.215f));
+            accentTexture = SolidTexture(new Color(0.18f, 0.42f, 0.58f));
+            fieldTexture = SolidTexture(new Color(0.19f, 0.225f, 0.27f));
+            titleStyle = new GUIStyle(GUI.skin.label) { fontSize = 18,
+                fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft };
+            titleStyle.normal.textColor = Color.white;
+            mutedStyle = new GUIStyle(GUI.skin.label) { fontSize = 13,
+                alignment = TextAnchor.MiddleLeft };
+            mutedStyle.normal.textColor = new Color(0.76f, 0.83f, 0.89f);
+            tabStyle = new GUIStyle(GUI.skin.button) { fontSize = 12,
+                alignment = TextAnchor.MiddleCenter };
+            tabStyle.normal.background = panelTexture;
+            tabStyle.hover.background = fieldTexture;
+            tabStyle.active.background = accentTexture;
+            tabStyle.normal.textColor = Color.white;
+            tabStyle.hover.textColor = Color.white;
+            activeTabStyle = new GUIStyle(tabStyle);
+            activeTabStyle.normal.background = accentTexture;
+            activeTabStyle.hover.background = accentTexture;
+            axisLabelStyle = new GUIStyle(GUI.skin.label) { fontSize = 12,
+                fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
+            axisLabelStyle.normal.textColor = Color.black;
+        }
+        GUI.skin.label.normal.textColor = Color.white;
+        GUI.skin.label.fontSize = 13;
+        GUI.skin.button.normal.background = panelTexture;
+        GUI.skin.button.hover.background = accentTexture;
+        GUI.skin.button.active.background = accentTexture;
+        GUI.skin.button.normal.textColor = Color.white;
+        GUI.skin.button.hover.textColor = Color.white;
+        GUI.skin.button.fontSize = 13;
+        GUI.skin.box.normal.background = panelTexture;
+        GUI.skin.box.normal.textColor = Color.white;
+        GUI.skin.textField.normal.background = fieldTexture;
+        GUI.skin.textField.focused.background = fieldTexture;
+        GUI.skin.textField.normal.textColor = Color.white;
+        GUI.skin.textField.focused.textColor = Color.white;
+        GUI.skin.scrollView.normal.background = panelTexture;
     }
 
     private void DrawSidebar()
     {
-        float left = Screen.width - 310;
-        float top = 155;
-        float panelHeight = Screen.height - top;
-        GUI.Box(new Rect(left, top, 310, panelHeight), "Map tools");
-        string[] tabs = { "Brushes", "Entities", "Players", "Decals" };
+        float left = Screen.width - ToolsWidth;
+        float top = HeaderHeight + 6f;
+        float panelHeight = Screen.height - top - StatusHeight - 6f;
+        GUI.Box(new Rect(left, top, ToolsWidth, panelHeight), "");
+        GUI.Label(new Rect(left + 12, top + 8, 300, 22), "WORKSPACE", mutedStyle);
+        string[] tabs = { "Objects", "Terrain", "Entities", "Players", "Decals" };
         for (int i = 0; i < tabs.Length; i++)
-            if (GUI.Button(new Rect(left + 10 + i * 73, top + 24, 72, 26), tabs[i]))
+            if (GUI.Button(new Rect(left + 10 + i * 62, top + 34, 61, 30),
+                           tabs[i], panelTab == i ? activeTabStyle : tabStyle))
             {
                 if (panelTab != i) Select(null);
                 panelTab = i;
                 terrainBrush = false;
+                if (i == 2 && transformTool == 3) transformTool = 0;
             }
-        if (panelTab == 0) DrawBrushPanel(left, top + 55);
-        else if (panelTab == 1) DrawEntityPanel(left, top + 55);
-        else if (panelTab == 2) DrawPlayersPanel(left, top + 55);
-        else DrawTilePanel(left, top + 55);
+        if (panelTab == 0) DrawBrushPanel(left, top + 76);
+        else if (panelTab == 1) DrawTerrainPanel(left, top + 76);
+        else if (panelTab == 2) DrawEntityPanel(left, top + 76);
+        else if (panelTab == 3) DrawPlayersPanel(left, top + 76);
+        else DrawTilePanel(left, top + 76);
+    }
+
+    private void DrawTerrainPanel(float left, float top)
+    {
+        GUI.Label(new Rect(left + 12, top, 290, 24), "HEIGHT BRUSH", titleStyle);
+        GUI.Label(new Rect(left + 12, top + 30, 300, 42),
+                  "Raise or lower existing terrain vertices.\nEach click changes height by one unit.");
+        if (GUI.Button(new Rect(left + 12, top + 84, 306, 34),
+                       terrainBrush ? "Height brush  ON" : "Height brush  OFF"))
+            terrainBrush = !terrainBrush;
+        GUI.Label(new Rect(left + 12, top + 132, 300, 24),
+                  "Left click  +1     Shift + click  -1", mutedStyle);
+        GUI.Label(new Rect(left + 12, top + 168, 300, 24),
+                  "Edited vertices: " + editedTerrain.Count, mutedStyle);
+        GUI.Label(new Rect(left + 12, top + 202, 300, 54),
+                  "Use Save copy to write height changes\nto a new .map file.", mutedStyle);
     }
 
     private void DrawTilePanel(float left, float top)
@@ -1600,28 +2026,29 @@ public sealed class PbStandaloneApp : MonoBehaviour
         if (GUI.Button(new Rect(left + 204, top + 82, 96, 25), "Clear"))
             ClearTileSelection();
         GUI.Label(new Rect(left + 10, top + 115, 60, 22), "Search:");
-        tileSearch = GUI.TextField(new Rect(left + 70, top + 115, 230, 22), tileSearch);
+        tileSearch = GUI.TextField(new Rect(left + 70, top + 115, 248, 26), tileSearch);
         float listTop = top + 143;
-        float listHeight = Mathf.Max(0, Screen.height - listTop - 10);
+        float listHeight = Mathf.Max(0, Screen.height - StatusHeight - listTop - 12);
         int visible = 0;
         foreach (PbMapTile tile in tileRows)
             if (TileRecord(tile).IndexOf(tileSearch, StringComparison.OrdinalIgnoreCase) >= 0)
                 visible++;
-        tileScroll = GUI.BeginScrollView(new Rect(left + 10, listTop, 290, listHeight),
-                                         tileScroll, new Rect(0, 0, 270, visible * 26));
+        tileScroll = GUI.BeginScrollView(new Rect(left + 10, listTop, 308, listHeight),
+                                         tileScroll, new Rect(0, 0, 286, visible * 28));
         int row = 0;
         foreach (PbMapTile tile in tileRows)
         {
             if (TileRecord(tile).IndexOf(tileSearch, StringComparison.OrdinalIgnoreCase) < 0)
                 continue;
-            float y = row * 26;
-            if (y + 26 >= tileScroll.y && y <= tileScroll.y + listHeight)
+            float y = row * 28;
+            if (y + 28 >= tileScroll.y && y <= tileScroll.y + listHeight)
             {
                 string name = tile.Descriptor.Split('?')[0].Replace('\\', '/');
                 string label = (tile.Table == "toptextures" ? "T" : "S") +
                     tile.Row + " | F" + tile.Flags + " | " +
                     Path.GetFileName(name);
-                if (GUI.Button(new Rect(0, y, 270, 25), label))
+                if (GUI.Button(new Rect(0, y, 286, 27), label,
+                               selectedTiles.Contains(tile) ? activeTabStyle : tabStyle))
                     SelectTile(tile, Event.current.shift);
             }
             row++;
@@ -1631,31 +2058,59 @@ public sealed class PbStandaloneApp : MonoBehaviour
 
     private void DrawBrushPanel(float left, float top)
     {
-        if (GUI.Button(new Rect(left + 10, top, 140, 25), "Placed brushes"))
+        if (GUI.Button(new Rect(left + 10, top, 150, 28), "Placed objects",
+                       brushTypeCatalog ? tabStyle : activeTabStyle))
             brushTypeCatalog = false;
-        if (GUI.Button(new Rect(left + 160, top, 140, 25), "Object types"))
+        if (GUI.Button(new Rect(left + 164, top, 154, 28), "Object catalog",
+                       brushTypeCatalog ? activeTabStyle : tabStyle))
             brushTypeCatalog = true;
-        if (GUI.Button(new Rect(left + 10, top + 30, 290, 25),
-                       terrainBrush ? "Height brush ON (Shift lowers)" : "Height brush OFF"))
-            terrainBrush = !terrainBrush;
         if (selected != null)
         {
             string name = selected.TypeIndex >= 0 && selected.TypeIndex < typeNames.Count
                 ? typeNames[selected.TypeIndex] : "unknown";
-            GUI.Label(new Rect(left + 10, top + 61, 290, 22),
-                      "Selected brush " + selected.Row + ": " + name);
-            if (GUI.Button(new Rect(left + 160, top + 87, 140, 25), "Delete selected"))
+            GUI.Label(new Rect(left + 12, top + 36, 300, 22),
+                      "OBJECT " + selected.Row + "  /  " + name);
+            GUI.Label(new Rect(left + 12, top + 62, 24, 22), "X", mutedStyle);
+            objectXText = GUI.TextField(new Rect(left + 31, top + 60, 70, 26), objectXText);
+            GUI.Label(new Rect(left + 111, top + 62, 24, 22), "Y", mutedStyle);
+            objectYText = GUI.TextField(new Rect(left + 130, top + 60, 70, 26), objectYText);
+            GUI.Label(new Rect(left + 210, top + 62, 24, 22), "H", mutedStyle);
+            objectHText = GUI.TextField(new Rect(left + 229, top + 60, 87, 26), objectHText);
+            GUI.Label(new Rect(left + 12, top + 91, 24, 22), "Z°", mutedStyle);
+            angleZText = GUI.TextField(new Rect(left + 36, top + 89, 65, 26), angleZText);
+            GUI.Label(new Rect(left + 111, top + 91, 24, 22), "X°", mutedStyle);
+            angleXText = GUI.TextField(new Rect(left + 135, top + 89, 65, 26), angleXText);
+            GUI.Label(new Rect(left + 210, top + 91, 24, 22), "Y°", mutedStyle);
+            angleYText = GUI.TextField(new Rect(left + 234, top + 89, 82, 26), angleYText);
+            GUI.Label(new Rect(left + 12, top + 122, 50, 22), "Scale", mutedStyle);
+            objectScaleText = GUI.TextField(new Rect(left + 60, top + 119, 78, 26),
+                                            objectScaleText);
+            if (GUI.Button(new Rect(left + 144, top + 119, 32, 26), "−"))
+            {
+                selected.SetScale(selected.Scale / 1.1f);
+                SyncObjectInspector(selected);
+            }
+            if (GUI.Button(new Rect(left + 181, top + 119, 32, 26), "+"))
+            {
+                selected.SetScale(selected.Scale * 1.1f);
+                SyncObjectInspector(selected);
+            }
+            if (GUI.Button(new Rect(left + 220, top + 119, 96, 26), "Apply"))
+                ApplyObjectInspector();
+            if (GUI.Button(new Rect(left + 166, top + 145, 152, 28), "Delete selected"))
                 DeleteSelected();
         }
-        if (GUI.Button(new Rect(left + 10, top + 87, 140, 25), "Add at center"))
+        else GUI.Label(new Rect(left + 12, top + 48, 300, 50),
+                       "Select an object on the map or in the list.", mutedStyle);
+        if (GUI.Button(new Rect(left + 10, top + 145, 152, 28), "Add at center"))
             AddObject();
-        GUI.Label(new Rect(left + 10, top + 118, 60, 22), "Search:");
+        GUI.Label(new Rect(left + 10, top + 182, 60, 22), "Search", mutedStyle);
         if (brushTypeCatalog)
-            typeSearch = GUI.TextField(new Rect(left + 70, top + 118, 230, 22), typeSearch);
+            typeSearch = GUI.TextField(new Rect(left + 70, top + 181, 248, 26), typeSearch);
         else
-            brushSearch = GUI.TextField(new Rect(left + 70, top + 118, 230, 22), brushSearch);
-        float listTop = top + 145;
-        float listHeight = Mathf.Max(0, Screen.height - listTop - 10);
+            brushSearch = GUI.TextField(new Rect(left + 70, top + 181, 248, 26), brushSearch);
+        float listTop = top + 215;
+        float listHeight = Mathf.Max(0, Screen.height - StatusHeight - listTop - 12);
         int visible = 0;
         if (brushTypeCatalog)
             for (int i = 0; i < typeNames.Count; i++)
@@ -1665,8 +2120,8 @@ public sealed class PbStandaloneApp : MonoBehaviour
             foreach (PbPlacedObject item in objects)
                 if ((item.Row + " " + BrushName(item)).IndexOf(
                     brushSearch, StringComparison.OrdinalIgnoreCase) >= 0) visible++;
-        catalogScroll = GUI.BeginScrollView(new Rect(left + 10, listTop, 290, listHeight),
-                                            catalogScroll, new Rect(0, 0, 270, visible * 25));
+        catalogScroll = GUI.BeginScrollView(new Rect(left + 10, listTop, 308, listHeight),
+                                            catalogScroll, new Rect(0, 0, 286, visible * 28));
         int row = 0;
         if (brushTypeCatalog)
         {
@@ -1674,7 +2129,10 @@ public sealed class PbStandaloneApp : MonoBehaviour
             {
                 if (typeNames[i].IndexOf(typeSearch, StringComparison.OrdinalIgnoreCase) < 0)
                     continue;
-                if (GUI.Button(new Rect(0, row * 25, 270, 24), i + ": " + typeNames[i]))
+                float y = row * 28;
+                if (y + 28 >= catalogScroll.y && y <= catalogScroll.y + listHeight &&
+                    GUI.Button(new Rect(0, y, 286, 27), i + ": " + typeNames[i],
+                               i == activeType ? activeTabStyle : tabStyle))
                 {
                     activeType = i;
                     if (selected != null) ChangeType(selected, i);
@@ -1686,9 +2144,10 @@ public sealed class PbStandaloneApp : MonoBehaviour
         {
             string label = item.Row + ": " + BrushName(item);
             if (label.IndexOf(brushSearch, StringComparison.OrdinalIgnoreCase) < 0) continue;
-            float y = row * 25;
-            if (y + 25 >= catalogScroll.y && y <= catalogScroll.y + listHeight &&
-                GUI.Button(new Rect(0, y, 270, 24), label)) Select(item);
+            float y = row * 28;
+            if (y + 28 >= catalogScroll.y && y <= catalogScroll.y + listHeight &&
+                GUI.Button(new Rect(0, y, 286, 27), label,
+                           item == selected ? activeTabStyle : tabStyle)) Select(item);
             row++;
         }
         GUI.EndScrollView();
@@ -1700,26 +2159,37 @@ public sealed class PbStandaloneApp : MonoBehaviour
 
     private void DrawEntityPanel(float left, float top)
     {
-        GUI.Label(new Rect(left + 10, top, 290, 22),
-                  selectedEntity == null ? "Select a model or a row below"
-                  : selectedEntity.Table + " " + selectedEntity.Row +
-                    " | kind " + selectedEntity.Kind + " | side " + selectedEntity.Side);
-        GUI.Label(new Rect(left + 10, top + 26, 290, 40),
-                  "IJKL move | ,/. rotate | PgUp/PgDn cannon height");
+        GUI.Label(new Rect(left + 12, top, 300, 25), "SCENE ENTITIES", titleStyle);
+        GUI.Label(new Rect(left + 12, top + 30, 300, 24),
+                  selectedEntity == null ? "Select a model or row below"
+                  : selectedEntity.Table + "  " + selectedEntity.Row +
+                    "   /   kind " + selectedEntity.Kind + "   /   side " + selectedEntity.Side);
+        if (selectedEntity != null)
+        {
+            Vector3 p = selectedEntity.transform.position;
+            GUI.Label(new Rect(left + 12, top + 54, 300, 22),
+                      "Map X " + CellX(p.x).ToString("0.##") +
+                      "   Y " + (p.z / CellSize).ToString("0.##") +
+                      "   H " + p.y.ToString("0.##"), mutedStyle);
+        }
+        GUI.Label(new Rect(left + 12, top + 78, 300, 22),
+                  "IJKL move  ·  ,/. rotate  ·  PgUp/Dn cannon", mutedStyle);
         if (voLoader != null && voLoader.MissingModelPaths.Count > 0)
-            GUI.Label(new Rect(left + 10, top + 61, 290, 22),
+            GUI.Label(new Rect(left + 12, top + 102, 300, 22),
                       "Missing model: " + Path.GetFileName(voLoader.MissingModelPaths[0]));
-        float listTop = top + 88;
-        float listHeight = Mathf.Max(0, Screen.height - listTop - 10);
-        entityScroll = GUI.BeginScrollView(new Rect(left + 10, listTop, 290, listHeight),
+        float listTop = top + 134;
+        float listHeight = Mathf.Max(0, Screen.height - StatusHeight - listTop - 12);
+        entityScroll = GUI.BeginScrollView(new Rect(left + 10, listTop, 308, listHeight),
                                            entityScroll,
-                                           new Rect(0, 0, 270, entityRoots.Count * 26));
+                                           new Rect(0, 0, 286, entityRoots.Count * 28));
         for (int i = 0; i < entityRoots.Count; i++)
         {
             PbMapEntity entity = entityRoots[i].GetComponent<PbMapEntity>();
             string label = entity.Table + " " + entity.Row + " | kind " + entity.Kind +
                            " | side " + entity.Side;
-            if (GUI.Button(new Rect(0, i * 26, 270, 25), label)) SelectEntity(entity);
+            if (GUI.Button(new Rect(0, i * 28, 286, 27), label,
+                           entity == selectedEntity ? activeTabStyle : tabStyle))
+                SelectEntity(entity);
         }
         GUI.EndScrollView();
     }
@@ -1728,12 +2198,13 @@ public sealed class PbStandaloneApp : MonoBehaviour
     {
         if (players == null) return;
         for (int i = 0; i < 4; i++)
-            if (GUI.Button(new Rect(left + 10 + i * 73, top, 72, 24), PbPlayers.Sides[i]))
+            if (GUI.Button(new Rect(left + 10 + i * 77, top, 76, 28),
+                           PbPlayers.Sides[i], i == playerSide ? activeTabStyle : tabStyle))
                 playerSide = i;
-        float listTop = top + 30;
-        float listHeight = Mathf.Max(0, Screen.height - listTop - 10);
-        playerScroll = GUI.BeginScrollView(new Rect(left + 10, listTop, 290, listHeight),
-                                           playerScroll, new Rect(0, 0, 270, 450));
+        float listTop = top + 36;
+        float listHeight = Mathf.Max(0, Screen.height - StatusHeight - listTop - 12);
+        playerScroll = GUI.BeginScrollView(new Rect(left + 10, listTop, 308, listHeight),
+                                           playerScroll, new Rect(0, 0, 286, 450));
         GUI.Label(new Rect(0, 0, 270, 23), "Starting resources — " + PbPlayers.Sides[playerSide]);
         for (int i = 0; i < 5; i++)
         {

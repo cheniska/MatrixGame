@@ -33,8 +33,9 @@ public static class PbObjectWriter
             {
                 bool moved = Moved(item);
                 bool rotated = Rotated(item);
+                bool scaled = Scaled(item);
                 bool retyped = item.TypeIndex != source.Int("objects", "Index", item.Row);
-                if (!moved && !rotated && !retyped) continue;
+                if (!moved && !rotated && !scaled && !retyped) continue;
                 if (retyped) result.SetInt("objects", "Index", item.Row, item.TypeIndex);
                 if (moved) SetPosition(result, item, cellSize, mapWidth);
                 if (rotated)
@@ -44,6 +45,7 @@ public static class PbObjectWriter
                     result.SetFloat("objects", "AngleX", item.Row, x);
                     result.SetFloat("objects", "AngleY", item.Row, y);
                 }
+                if (scaled) result.SetFloat("objects", "Scale", item.Row, item.Scale);
                 changed++;
             }
             return result;
@@ -75,6 +77,9 @@ public static class PbObjectWriter
     private static bool Rotated(PbPlacedObject item) => item.Row < 0 ||
         Quaternion.Angle(item.transform.rotation, item.ImportedRotation) > 0.01f;
 
+    private static bool Scaled(PbPlacedObject item) => item.Row < 0 ||
+        Mathf.Abs(item.Scale - item.ImportedScale) > 0.0001f;
+
     private static void Split(PbPlacedObject item, float cellSize, int mapWidth,
                               out int x, out int y, out float xf, out float yf)
     {
@@ -102,10 +107,10 @@ public static class PbObjectWriter
     private static float GetFloat(PbStorage source, PbPlacedObject item,
                                   string field, float cellSize, int mapWidth)
     {
-        if (item.Row >= 0 && field == "Scale")
+        if (item.Row >= 0 && field == "Scale" && !Scaled(item))
             return source.Float("objects", field, item.Row);
         if (item.Row >= 0 && !Moved(item) && field != "Angle" &&
-            field != "AngleX" && field != "AngleY")
+            field != "AngleX" && field != "AngleY" && field != "Scale")
             return source.Float("objects", field, item.Row);
         if (field == "Angle" || field == "AngleX" || field == "AngleY")
         {
@@ -114,7 +119,7 @@ public static class PbObjectWriter
             Rotation(item, out float z, out float x, out float y);
             return field == "Angle" ? z : field == "AngleX" ? x : y;
         }
-        if (field == "Scale") return 1f;
+        if (field == "Scale") return item.Scale;
         Split(item, cellSize, mapWidth, out _, out _, out float xf, out float yf);
         if (field == "XF") return xf;
         if (field == "YF") return yf;
